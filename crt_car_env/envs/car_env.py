@@ -156,25 +156,101 @@ class CRTCarEnv(gym.Env):
         observation = self._get_obs()
         
         # Calcular recompensa
-        # Recompensa base por velocidad (fomenta el movimiento)
-        reward = abs(self.state['speed']) / MAX_SPEED * 0.1
+        reward = 0.0
         
-        # Penalización por estar cerca de las paredes
-        min_sensor = np.min(observation[1:])  # Excluir la orientación
-        if min_sensor < CAR_LENGTH:
-            reward -= (CAR_LENGTH - min_sensor) / CAR_LENGTH
+        # 1. Recompensa por movimiento
+        current_speed = self.state['speed']
+        speed_input, steer_input = action  # Obtener las acciones originales
+        
+        # Recompensa por movimiento hacia adelante y giros
+        if speed_input > 0:  # Si la acción intenta ir hacia adelante
+            # Recompensa base por intentar ir hacia adelante
+            reward += 1.0
+            
+            # Recompensa adicional por velocidad efectiva hacia adelante
+            if current_speed > 0:
+                # Recompensa muy alta por mantener velocidad hacia adelante
+                forward_reward = 4.0 * (current_speed / MAX_SPEED)
+                reward += forward_reward
+                
+                # Recompensa adicional por combinar movimiento hacia adelante con giro
+                if abs(steer_input) > 0.1:  # Si está girando mientras avanza
+                    # Mayor recompensa por giros mientras avanza
+                    turning_reward = 2.0 * abs(steer_input)
+                    reward += turning_reward
+        else:
+            # Penalización muy severa por intentar retroceder
+            reward -= 5.0
+            
+            # Penalización adicional si efectivamente está retrocediendo
+            if current_speed < 0:
+                reward -= 5.0 * abs(current_speed) / MAX_SPEED
+        
+        # 2. Manejo de obstáculos y comportamiento cerca de ellos
+        sensor_frontal = observation[1]  # Lectura del sensor frontal
+        sensor_izq = observation[3]      # Lectura del sensor izquierdo
+        sensor_der = observation[4]      # Lectura del sensor derecho
+        # Solo consideramos sensores frontales y laterales para distancias
+        sensores_activos = [sensor_frontal, sensor_izq, sensor_der]
+        min_sensor = np.min(sensores_activos)
+        
+        guarding_distance = CAR_LENGTH * 1.2  # Distancia de guarding
+        danger_distance = CAR_LENGTH * 0.8    # Distancia de peligro
+        optimal_distance = CAR_LENGTH * 1.0    # Distancia óptima para seguir paredes
+        
+        # Recompensas por proximidad controlada y comportamiento cerca de obstáculos
+        if min_sensor < guarding_distance:
+            if danger_distance < min_sensor < guarding_distance:
+                # Recompensa GRANDE por mantener distancia óptima
+                distance_to_optimal = abs(min_sensor - optimal_distance)
+                proximity_reward = 8.0 * (1.0 - distance_to_optimal / (guarding_distance - danger_distance))
+                reward += proximity_reward
+                
+                # Recompensa adicional por girar cuando está cerca de obstáculos
+                if abs(steer_input) > 0.1 and current_speed > 0:
+                    # Recompensa MUY ALTA por seguir paredes
+                    wall_following_reward = 6.0 * abs(steer_input)
+                    reward += wall_following_reward
+            elif min_sensor < danger_distance:
+                # Penalización moderada en zona de peligro (menor que la de retroceder)
+                danger_penalty = 2.0 * ((danger_distance - min_sensor) / danger_distance)
+                reward -= danger_penalty
+        else:
+            # Penalización por estar muy lejos de obstáculos
+            reward -= 1.0
+        
+        # 3. Recompensa por comportamiento de navegación inteligente
+        # Si detecta obstáculo al frente, recompensar fuertemente el giro apropiado
+        if sensor_frontal < guarding_distance:
+            # Determinar el mejor lado para girar
+            if sensor_izq > sensor_der:
+                # Recompensar giro a la izquierda
+                if steer_input > 0:
+                    reward += 4.0 * steer_input
+            else:
+                # Recompensar giro a la derecha
+                if steer_input < 0:
+                    reward += 4.0 * abs(steer_input)
+        
+        # Comparación de recompensas/penalizaciones:
+        # - Retroceder: -5.0 a -10.0
+        # - Mantener distancia óptima: hasta +8.0
+        # - Seguir paredes con giros: hasta +6.0
+        # - Giros apropiados cerca de obstáculos: hasta +4.0
+        # - Zona de peligro: -2.0 (menos que retroceder)
+        # - Lejos de obstáculos: -1.0
         
         # Verificar terminación
         terminated = False
         
-        # Terminar si hay colisión con pared
+        # Terminar si hay colisión con pared u obstáculo
         if min_sensor < self.car_width:
-            reward -= 10.0  # Gran penalización por colisión
+            reward -= 10.0  # Penalización severa por colisión
             terminated = True
         
         # Terminar si sale del mapa
         if not (0 <= self.state['x'] <= MAP_SIZE and 0 <= self.state['y'] <= MAP_SIZE):
-            reward -= 5.0
+            reward -= 10.0  # Penalización severa por salir del mapa
             terminated = True
             
         truncated = False
@@ -323,15 +399,18 @@ class CRTCarEnv(gym.Env):
         # Dibujar el coche
         car_pos = (int(self.state['x']), int(self.state['y']))
         
+        # Hacer el carro más rectangular (reducir el ancho)
+        car_width = self.car_width * 0.7  # Reducir el ancho para hacerlo más rectangular
+        
         # Puntos del coche (forma rectangular)
         car_points = [
-            (-CAR_LENGTH/2, -self.car_width),    # Atrás izquierda
-            (CAR_LENGTH/2, -self.car_width),     # Frente izquierda
-            (CAR_LENGTH/2, self.car_width),      # Frente derecha
-            (-CAR_LENGTH/2, self.car_width),     # Atrás derecha
+            (-CAR_LENGTH/2, -car_width),    # Atrás izquierda
+            (CAR_LENGTH/2, -car_width),     # Frente izquierda
+            (CAR_LENGTH/2, car_width),      # Frente derecha
+            (-CAR_LENGTH/2, car_width),     # Atrás derecha
         ]
         
-        # Rotar puntos
+        # Rotar puntos del cuerpo principal
         rotated_points = []
         for x, y in car_points:
             rx = x * cos(self.state['theta']) - y * sin(self.state['theta'])
@@ -341,22 +420,56 @@ class CRTCarEnv(gym.Env):
                 int(car_pos[1] + ry)
             ))
         
-        # Dibujar cuerpo del coche
+        # Dibujar cuerpo principal del coche
         pygame.draw.polygon(canvas, (0, 0, 255), rotated_points)  # Azul
         
-        # Dibujar dirección (frente del coche)
-        front_x = car_pos[0] + cos(self.state['theta']) * CAR_LENGTH/2
-        front_y = car_pos[1] + sin(self.state['theta']) * CAR_LENGTH/2
-        pygame.draw.circle(canvas, (255, 255, 0), (int(front_x), int(front_y)), 5)
+        # Puntos para el rectángulo rojo del frente
+        front_width = car_width * 0.8  # Un poco más estrecho que el cuerpo
+        front_length = CAR_LENGTH * 0.2  # 20% del largo total
+        front_offset = CAR_LENGTH/2 - front_length/2  # Posicionar en el frente
+        
+        front_points = [
+            (front_offset, -front_width),                 # Izquierda atrás
+            (front_offset + front_length, -front_width),  # Izquierda frente
+            (front_offset + front_length, front_width),   # Derecha frente
+            (front_offset, front_width),                  # Derecha atrás
+        ]
+        
+        # Rotar puntos del frente
+        rotated_front_points = []
+        for x, y in front_points:
+            rx = x * cos(self.state['theta']) - y * sin(self.state['theta'])
+            ry = x * sin(self.state['theta']) + y * cos(self.state['theta'])
+            rotated_front_points.append((
+                int(car_pos[0] + rx),
+                int(car_pos[1] + ry)
+            ))
+        
+        # Dibujar el rectángulo rojo del frente
+        pygame.draw.polygon(canvas, (255, 0, 0), rotated_front_points)  # Rojo
         
         # Dibujar sensores
         sensor_readings = self._get_sensor_readings()
         sensor_angles = [0, pi, pi/2, -pi/2]
+        guarding_distance = CAR_LENGTH * 1.2  # Distancia de guardia
+        
         for reading, angle in zip(sensor_readings, sensor_angles):
-            end_x = car_pos[0] + cos(self.state['theta'] + angle) * reading
-            end_y = car_pos[1] + sin(self.state['theta'] + angle) * reading
-            color = (0, 255, 0) if reading > CAR_LENGTH else (255, 0, 0)  # Verde si está lejos, rojo si está cerca
-            pygame.draw.line(canvas, color, car_pos, (int(end_x), int(end_y)), 2)
+            abs_angle = self.state['theta'] + angle
+            
+            # Punto donde termina la zona roja (umbral de guardia)
+            guard_x = car_pos[0] + cos(abs_angle) * guarding_distance
+            guard_y = car_pos[1] + sin(abs_angle) * guarding_distance
+            
+            # Punto final del sensor (donde detecta algo)
+            end_x = car_pos[0] + cos(abs_angle) * reading
+            end_y = car_pos[1] + sin(abs_angle) * reading
+            
+            # Dibujar parte roja (desde el carro hasta el umbral)
+            pygame.draw.line(canvas, (255, 0, 0), car_pos, (int(guard_x), int(guard_y)), 2)
+            
+            # Dibujar parte verde (desde el umbral hasta donde detecta algo)
+            pygame.draw.line(canvas, (0, 255, 0), (int(guard_x), int(guard_y)), 
+                           (int(end_x), int(end_y)), 2)
 
         if self.render_mode == "human":
             self.window.blit(canvas, (0, 0))
