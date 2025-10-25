@@ -178,5 +178,7 @@ pyrightconfig.json
 # Mise configurations
 mise.toml
 
-# 
+# project configuration
 *.yaml
+
+checkpoints/
