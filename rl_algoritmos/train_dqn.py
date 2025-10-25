@@ -4,8 +4,34 @@ import torch
 import wandb
 from datetime import datetime
 import os
+import signal
+import sys
 from agents.dqn_agent import DQNAgent
 import crt_car_env  # Importar el paquete del entorno
+
+# Variables globales para el manejo de la interrupción
+current_agent = None
+checkpoint_dir = "checkpoints"
+
+def signal_handler(sig, frame):
+    """Maneja la interrupción Ctrl+C guardando los pesos antes de salir"""
+    print('\nInterrumpiendo entrenamiento. Guardando checkpoint...')
+    if current_agent is not None:
+        # Crear directorio si no existe
+        os.makedirs(checkpoint_dir, exist_ok=True)
+        
+        # Guardar checkpoint de interrupción
+        interrupt_checkpoint_path = os.path.join(
+            checkpoint_dir,
+            f'dqn_interrupt_{datetime.now().strftime("%Y%m%d_%H%M%S")}.pth'
+        )
+        current_agent.save(interrupt_checkpoint_path)
+        print(f'Checkpoint guardado en: {interrupt_checkpoint_path}')
+    
+    sys.exit(0)
+
+# Registrar el manejador de señales
+signal.signal(signal.SIGINT, signal_handler)
 
 def discretize_action(action_idx, num_speed_levels=3, num_steering_levels=5):
     """
@@ -29,6 +55,7 @@ def train_dqn(env_name='CRTCar-v0',
               eps_decay=0.995,
               checkpoint_dir='checkpoints',
               use_wandb=True):
+    global current_agent  # Declarar uso de variable global
     print(f"Creating environment: {env_name}")
     """
     Entrenamiento del agente DQN.
@@ -57,6 +84,7 @@ def train_dqn(env_name='CRTCar-v0',
     
     action_size = 15  # 3 niveles de velocidad * 5 niveles de dirección
     agent = DQNAgent(state_size=state_size, action_size=action_size)
+    current_agent = agent  # Asignar el agente a la variable global
     
     # Configurar W&B
     if use_wandb:
