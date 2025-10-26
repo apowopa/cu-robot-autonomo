@@ -21,6 +21,7 @@ GUARDING_DISTANCE = SENSOR_RANGE    # Distancia de monitoreo
 NUM_RECTANGLES = 15  # Número de obstáculos rectangulares
 MIN_OBSTACLE_SIZE = 30.0  # Tamaño mínimo de los obstáculos
 MAX_OBSTACLE_SIZE = 75.0  # Tamaño máximo de los obstáculos
+MIN_DISTANCE_BETWEEN_OBSTACLE = 80
 
 class CRTCarEnv(gym.Env):
     """
@@ -353,19 +354,42 @@ class CRTCarEnv(gym.Env):
         return observation, reward, terminated, truncated, info
 
     def _generate_random_obstacles(self):
-        """Genera obstáculos aleatorios en el mapa."""
+        """Genera obstáculos aleatorios en el mapa manteniendo una distancia mínima entre ellos."""
         self.obstacles['rectangles'] = []
         self.obstacles['circles'] = []
         
         margin = CAR_LENGTH * 3  # Margen para evitar obstáculos muy cerca de los bordes
+        max_attempts = 100  # Número máximo de intentos por obstáculo
         
         # Generar rectángulos aleatorios
         for _ in range(NUM_RECTANGLES):
-            width = self.np_random.uniform(MIN_OBSTACLE_SIZE, MAX_OBSTACLE_SIZE)
-            height = self.np_random.uniform(MIN_OBSTACLE_SIZE, MAX_OBSTACLE_SIZE)
-            x = self.np_random.uniform(margin, MAP_SIZE - width - margin)
-            y = self.np_random.uniform(margin, MAP_SIZE - height - margin)
-            self.obstacles['rectangles'].append([x, y, width, height])
+            placed = False
+            for attempt in range(max_attempts):
+                width = self.np_random.uniform(MIN_OBSTACLE_SIZE, MAX_OBSTACLE_SIZE)
+                height = self.np_random.uniform(MIN_OBSTACLE_SIZE, MAX_OBSTACLE_SIZE)
+                x = self.np_random.uniform(margin, MAP_SIZE - width - margin)
+                y = self.np_random.uniform(margin, MAP_SIZE - height - margin)
+                
+                # Verificar distancia con otros obstáculos
+                valid_position = True
+                for other_obs in self.obstacles['rectangles']:
+                    ox, oy, ow, oh = other_obs
+                    # Calcular centros
+                    center1 = np.array([x + width/2, y + height/2])
+                    center2 = np.array([ox + ow/2, oy + oh/2])
+                    # Calcular distancia entre centros
+                    distance = np.linalg.norm(center1 - center2)
+                    if distance < MIN_DISTANCE_BETWEEN_OBSTACLE:
+                        valid_position = False
+                        break
+                
+                if valid_position:
+                    self.obstacles['rectangles'].append([x, y, width, height])
+                    placed = True
+                    break
+                    
+            if not placed and self.render_mode == "human":
+                print(f"Advertencia: No se pudo colocar el obstáculo {_+1} después de {max_attempts} intentos")
 
     def _check_obstacle_collision(self, position):
         """
@@ -406,12 +430,29 @@ class CRTCarEnv(gym.Env):
             
         return True
 
-    def reset(self, seed=None, options=None):
+    def reset(self, *, seed=None, options=None):
+        """
+        Reinicia el entorno con un nuevo seed.
+        
+        Args:
+            seed: Semilla para el generador de números aleatorios
+            options: Opciones adicionales (no utilizadas actualmente)
+            
+        Returns:
+            observation: Primera observación del episodio
+            info: Información adicional del estado
+        """
+        # Inicializar el generador de números aleatorios
         super().reset(seed=seed)
+        
+        # Asegurarse de que numpy.random también use la misma semilla
+        if seed is not None:
+            np.random.seed(seed)
         
         # Reiniciar el contador de pasos
         self.step_count = 0
         
+        # Generar nuevo mapa de obstáculos
         self._generate_random_obstacles()
         
         # Encontrar una posición inicial válida para el coche
@@ -431,6 +472,8 @@ class CRTCarEnv(gym.Env):
                 break
         else:
             # Si no se encuentra una posición válida, usar el centro del mapa
+            if self.render_mode == "human":
+                print("Advertencia: No se encontró una posición inicial válida")
             self.state['x'] = MAP_SIZE / 2
             self.state['y'] = MAP_SIZE / 2
             self.state['theta'] = 0.0
