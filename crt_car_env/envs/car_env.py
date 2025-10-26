@@ -37,6 +37,11 @@ class CRTCarEnv(gym.Env):
         low_obs = np.array([-pi, 0.0, 0.0, 0.0, 0.0], dtype=np.float32)
         high_obs = np.array([pi, SENSOR_RANGE, SENSOR_RANGE, SENSOR_RANGE, SENSOR_RANGE], dtype=np.float32)
         self.observation_space = spaces.Box(low=low_obs, high=high_obs, dtype=np.float32)
+        
+        # Contador de pasos para el episodio actual
+        self.step_count = 0
+        # Máximo número de pasos por episodio (30 segundos a 30 FPS)
+        self.max_steps = 30 * self.metadata["render_fps"]
 
         # Configurar el espacio de acciones discreto
         self.discrete_actions = DiscreteActionSpace()
@@ -243,20 +248,42 @@ class CRTCarEnv(gym.Env):
         # -1.0: Girar en la dirección menos óptima
         # -0.5: Girar sin necesidad
         
+        # Incrementar el contador de pasos
+        self.step_count += 1
+        
+        # Recompensa por supervivencia (aumenta con el tiempo)
+        survival_reward = 0.1 * (self.step_count / self.max_steps)
+        reward += survival_reward
+        
         # Verificar terminación
         terminated = False
+        truncated = False
         
         # Terminar si hay colisión con pared u obstáculo
         if min_sensor < self.car_width:
-            reward -= 10.0  # Penalización severa por colisión
+            # Penalización proporcional: es más severa si muere pronto
+            early_death_penalty = 20.0 * (1 - self.step_count / self.max_steps)
+            reward -= early_death_penalty
+            if self.render_mode == "human":
+                print(f"\nColisión detectada! Penalización: {early_death_penalty:.2f}")
+                print(f"Tiempo de supervivencia: {self.step_count} pasos")
             terminated = True
         
         # Terminar si sale del mapa
         if not (0 <= self.state['x'] <= MAP_SIZE and 0 <= self.state['y'] <= MAP_SIZE):
-            reward -= 10.0  # Penalización severa por salir del mapa
+            # Penalización proporcional por salir del mapa
+            early_death_penalty = 20.0 * (1 - self.step_count / self.max_steps)
+            reward -= early_death_penalty
+            if self.render_mode == "human":
+                print(f"\nSalió del mapa! Penalización: {early_death_penalty:.2f}")
+                print(f"Tiempo de supervivencia: {self.step_count} pasos")
             terminated = True
             
-        truncated = False
+        # Terminar si se alcanza el máximo de pasos
+        if self.step_count >= self.max_steps:
+            if self.render_mode == "human":
+                print("\n¡Episodio completado! Supervivencia máxima alcanzada.")
+            truncated = True
         info = self._get_info()
 
         if self.render_mode == "human":
@@ -318,8 +345,11 @@ class CRTCarEnv(gym.Env):
             
         return True
 
-    def reset(self, seed=int | None, options=None):
+    def reset(self, seed=None, options=None):
         super().reset(seed=seed)
+        
+        # Reiniciar el contador de pasos
+        self.step_count = 0
         
         self._generate_random_obstacles()
         
