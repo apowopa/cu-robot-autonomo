@@ -1,7 +1,6 @@
 import gymnasium as gym
 import numpy as np
 import torch
-import wandb
 from datetime import datetime
 import os
 import signal
@@ -40,7 +39,6 @@ def train_dqn(env_name='CRTCar-v0',
               eps_end=0.01,
               eps_decay=0.995,
               checkpoint_dir='checkpoints',
-              use_wandb=True,
               agent=None,
               render_mode="human",  # Añadido parámetro para modo de renderizado
               tag="default",  # Añadido parámetro para el tag
@@ -63,25 +61,6 @@ def train_dqn(env_name='CRTCar-v0',
     """
     current_agent = agent  # Asignar el agente a la variable global
     
-    # Configurar W&B
-    if use_wandb:
-        wandb.init(
-            project="crt-car-dqn",
-            config={
-                "n_episodes": n_episodes,
-                "max_t": max_t,
-                "eps_start": eps_start,
-                "eps_end": eps_end,
-                "eps_decay": eps_decay,
-                "buffer_size": agent.memory.memory.maxlen,
-                "batch_size": agent.batch_size,
-                "gamma": agent.gamma,
-                "tau": agent.tau,
-                "lr": agent.optimizer.param_groups[0]['lr'],
-                "update_every": agent.update_every
-            }
-        )
-    
     # Crear directorio para checkpoints
     os.makedirs(checkpoint_dir, exist_ok=True)
     
@@ -94,6 +73,14 @@ def train_dqn(env_name='CRTCar-v0',
     # Crear el entorno de entrenamiento
     env = gym.make(env_name, render_mode=render_mode)
     print(f"Render mode: {render_mode}")
+    
+    # Variables para el seguimiento del rendimiento
+    best_score = float('-inf')  # Mejor puntuación hasta ahora
+    best_model_state = None     # Estado del mejor modelo
+    no_improvement_count = 0     # Contador de episodios sin mejora
+    improvement_threshold = 0.1  # Umbral de mejora (10%)
+    patience = 50               # Número de episodios a esperar antes de restaurar
+    evaluation_window = 10      # Ventana de episodios para calcular la media
     
     if debug:
         print("\n=== MODO DEBUG ACTIVADO ===")
@@ -154,16 +141,38 @@ def train_dqn(env_name='CRTCar-v0',
         # Guardar puntuación
         scores.append(score)
         
+        # Calcular puntuación media de la ventana actual
+        current_window = scores[-evaluation_window:] if len(scores) >= evaluation_window else scores
+        current_avg_score = np.mean(current_window)
+        
+        # Verificar si hay mejora
+        if current_avg_score > best_score * (1 + improvement_threshold):
+            # Hay una mejora significativa
+            best_score = current_avg_score
+            best_model_state = agent.get_model_state()
+            no_improvement_count = 0
+            if debug:
+                print(f"\n¡Nuevo mejor modelo! Score: {current_avg_score:.2f}")
+        else:
+            no_improvement_count += 1
+            
+            # Si no hay mejora después de 'patience' episodios, restaurar al mejor modelo
+            if no_improvement_count >= patience and best_model_state is not None:
+                print(f"\nNo hay mejora en {patience} episodios. Restaurando mejor modelo...")
+                agent.set_model_state(best_model_state)
+                no_improvement_count = 0
+                if debug:
+                    print(f"Modelo restaurado. Mejor score: {best_score:.2f}")
+        
         # Imprimir progreso
         if render_mode == "human":
-            print(f'\rEpisodio {i_episode}\tPuntuación: {score:.2f}\tEpsilon: {eps:.2f}', end="")
+            print(f'\rEpisodio {i_episode}\tPuntuación: {score:.2f}\tMejor: {best_score:.2f}\tEpsilon: {eps:.2f}', end="")
             if i_episode % 100 == 0:
-                print(f'\rEpisodio {i_episode}\tPuntuación media: {np.mean(scores[-100:]):.2f}')
+                print(f'\rEpisodio {i_episode}\tPuntuación media: {current_avg_score:.2f}')
         else:
             # En modo no visual, imprimir actualizaciones más concisas
             if i_episode % 10 == 0:  # Actualizar cada 10 episodios
-                mean_score = np.mean(scores[-100:]) if len(scores) >= 100 else np.mean(scores)
-                print(f'\rEp: {i_episode}/{n_episodes} | Score: {score:.1f} | Avg: {mean_score:.1f} | ε: {eps:.2f}', end="")
+                print(f'\rEp: {i_episode}/{n_episodes} | Score: {score:.1f} | Avg: {current_avg_score:.1f} | Best: {best_score:.1f} | ε: {eps:.2f}', end="")
             
             # Guardar checkpoint cada 250 episodios
             if i_episode % 250 == 0:
@@ -174,24 +183,12 @@ def train_dqn(env_name='CRTCar-v0',
                 agent.save(checkpoint_path)
                 print(f"\nGuardando checkpoint en episodio {i_episode}")
         
-        # Logging en W&B
-        if use_wandb:
-            wandb.log({
-                "episode": i_episode,
-                "score": score,
-                "epsilon": eps,
-                "average_score": np.mean(scores[-100:]) if len(scores) >= 100 else np.mean(scores)
-            })
-    
     # Guardar modelo final
     final_checkpoint_path = os.path.join(
         checkpoint_dir,
         f'dqn_{tag}_final_{datetime.now().strftime("%Y%m%d_%H%M%S")}.pth'
     )
     agent.save(final_checkpoint_path)
-    
-    if use_wandb:
-        wandb.finish()
     
     # Cerrar el entorno
     env.close()
@@ -220,7 +217,6 @@ if __name__ == "__main__":
         "eps_end": 0.01,
         "eps_decay": 0.995,
         "checkpoint_dir": "checkpoints",
-        "use_wandb": False,
         "render_mode": "human" if args.render else None,  # Modo de renderizado según el argumento
         "tag": args.tag,  # Agregar el tag a la configuración
         "debug": args.debug  # Modo debug

@@ -147,3 +147,17 @@ class DQNAgent:
         self.qnetwork_local.load_state_dict(checkpoint['qnetwork_local_state_dict'])
         self.qnetwork_target.load_state_dict(checkpoint['qnetwork_target_state_dict'])
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        
+    def get_model_state(self):
+        """Obtiene una copia del estado actual del modelo."""
+        return {
+            'local': self.qnetwork_local.state_dict(),
+            'target': self.qnetwork_target.state_dict(),
+            'optimizer': self.optimizer.state_dict()
+        }
+        
+    def set_model_state(self, state):
+        """Restaura el modelo a un estado previo."""
+        self.qnetwork_local.load_state_dict(state['local'])
+        self.qnetwork_target.load_state_dict(state['target'])
+        self.optimizer.load_state_dict(state['optimizer'])
