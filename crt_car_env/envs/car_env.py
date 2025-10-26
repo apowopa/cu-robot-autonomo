@@ -3,6 +3,7 @@ import numpy as np
 from gymnasium import spaces
 import pygame
 from math import sin, cos, pi, tan
+from .actions import DiscreteActionSpace, Action
 
 # Parámetros de la Simulación
 MAP_SIZE = 800.0  # Tamaño del mapa en píxeles
@@ -11,11 +12,15 @@ MAX_SPEED = 200.0  # Velocidad máxima en píxeles por segundo
 MAX_STEER_ANGLE = pi / 4  # 45 grados
 SENSOR_RANGE = 200.0  # Rango máximo de los sensores
 
+# Distancias críticas para los sensores (en función del largo del carro)
+DANGER_DISTANCE = CAR_LENGTH * 2.5     # Zona de peligro inmediato
+OPTIMAL_DISTANCE = CAR_LENGTH * 3.5     # Distancia óptima para seguir paredes
+GUARDING_DISTANCE = SENSOR_RANGE    # Distancia de monitoreo
+
 # Parámetros de los obstáculos
 NUM_RECTANGLES = 5  # Número de obstáculos rectangulares
-NUM_CIRCLES = 3    # Número de obstáculos circulares
 MIN_OBSTACLE_SIZE = 30.0  # Tamaño mínimo de los obstáculos
-MAX_OBSTACLE_SIZE = 100.0  # Tamaño máximo de los obstáculos
+MAX_OBSTACLE_SIZE = 75.0  # Tamaño máximo de los obstáculos
 
 class CRTCarEnv(gym.Env):
     """
@@ -33,10 +38,14 @@ class CRTCarEnv(gym.Env):
         high_obs = np.array([pi, SENSOR_RANGE, SENSOR_RANGE, SENSOR_RANGE, SENSOR_RANGE], dtype=np.float32)
         self.observation_space = spaces.Box(low=low_obs, high=high_obs, dtype=np.float32)
 
-        # Espacio de acción:
+        # Configurar el espacio de acciones discreto
+        self.discrete_actions = DiscreteActionSpace()
+        self.action_space = spaces.Discrete(self.discrete_actions.n)
+
+        # Espacio de acción interno (para el modelo físico):
         # [velocidad, ángulo_dirección]
         # Ambos son valores continuos entre -1.0 y 1.0
-        self.action_space = spaces.Box(
+        self._continuous_action_space = spaces.Box(
             low=np.array([-1.0, -1.0]),
             high=np.array([1.0, 1.0]),
             dtype=np.float32
@@ -59,7 +68,6 @@ class CRTCarEnv(gym.Env):
         # Lista de obstáculos
         self.obstacles = {
             'rectangles': [],  # Lista de [x, y, width, height]
-            'circles': []      # Lista de [x, y, radius]
         }
 
     def _get_sensor_readings(self):
@@ -68,13 +76,11 @@ class CRTCarEnv(gym.Env):
         Detecta tanto paredes como obstáculos.
         """
         readings = np.zeros(4)
-        # Ángulos de los sensores relativos al coche [frontal, trasero, izquierdo, derecho]
-        sensor_angles = [0, pi, pi/2, -pi/2]
+        #[frontal, trasero, izquierdo, derecho]
+        sensor_angles = [0, pi, pi/3, -pi/3]
         
         for i, angle in enumerate(sensor_angles):
-            # Ángulo absoluto del sensor
             abs_angle = self.state['theta'] + angle
-            # Vector de dirección del sensor
             direction = np.array([cos(abs_angle), sin(abs_angle)])
             
             # Ray casting
@@ -149,8 +155,12 @@ class CRTCarEnv(gym.Env):
         """
         dt = 1.0 / self.metadata["render_fps"]  # Paso de tiempo basado en FPS
         
+        # Convertir acción discreta a continua
+        discrete_action = self.discrete_actions.get_action(action)
+        continuous_action = discrete_action.to_array()
+        
         # Aplicar acción y actualizar estado
-        self._calculate_kinematics(action, dt)
+        self._calculate_kinematics(continuous_action, dt)
         
         # Obtener nueva observación
         observation = self._get_obs()
@@ -158,87 +168,80 @@ class CRTCarEnv(gym.Env):
         # Calcular recompensa
         reward = 0.0
         
-        # 1. Recompensa por movimiento
-        current_speed = self.state['speed']
-        speed_input, steer_input = action  # Obtener las acciones originales
-        
-        # Recompensa por movimiento hacia adelante y giros
-        if speed_input > 0:  # Si la acción intenta ir hacia adelante
-            # Recompensa base por intentar ir hacia adelante
-            reward += 1.0
-            
-            # Recompensa adicional por velocidad efectiva hacia adelante
-            if current_speed > 0:
-                # Recompensa muy alta por mantener velocidad hacia adelante
-                forward_reward = 4.0 * (current_speed / MAX_SPEED)
-                reward += forward_reward
-                
-                # Recompensa adicional por combinar movimiento hacia adelante con giro
-                if abs(steer_input) > 0.1:  # Si está girando mientras avanza
-                    # Mayor recompensa por giros mientras avanza
-                    turning_reward = 2.0 * abs(steer_input)
-                    reward += turning_reward
-        else:
-            # Penalización muy severa por intentar retroceder
-            reward -= 5.0
-            
-            # Penalización adicional si efectivamente está retrocediendo
-            if current_speed < 0:
-                reward -= 5.0 * abs(current_speed) / MAX_SPEED
-        
-        # 2. Manejo de obstáculos y comportamiento cerca de ellos
+        # Para debugging
+        if self.render_mode == "human":
+            print(f"\nAcción ejecutada: {self.discrete_actions.describe_action(discrete_action)}")
+
+        # Obtener lecturas de sensores
         sensor_frontal = observation[1]  # Lectura del sensor frontal
         sensor_izq = observation[3]      # Lectura del sensor izquierdo
         sensor_der = observation[4]      # Lectura del sensor derecho
-        # Solo consideramos sensores frontales y laterales para distancias
-        sensores_activos = [sensor_frontal, sensor_izq, sensor_der]
-        min_sensor = np.min(sensores_activos)
+        min_sensor = np.min([sensor_frontal, sensor_izq, sensor_der])
         
-        guarding_distance = CAR_LENGTH * 1.2  # Distancia de guarding
-        danger_distance = CAR_LENGTH * 0.8    # Distancia de peligro
-        optimal_distance = CAR_LENGTH * 1.0    # Distancia óptima para seguir paredes
+        # 1. Recompensas base por acción
+        action_desc = self.discrete_actions.describe_action(discrete_action)
         
-        # Recompensas por proximidad controlada y comportamiento cerca de obstáculos
-        if min_sensor < guarding_distance:
-            if danger_distance < min_sensor < guarding_distance:
-                # Recompensa GRANDE por mantener distancia óptima
-                distance_to_optimal = abs(min_sensor - optimal_distance)
-                proximity_reward = 8.0 * (1.0 - distance_to_optimal / (guarding_distance - danger_distance))
-                reward += proximity_reward
-                
-                # Recompensa adicional por girar cuando está cerca de obstáculos
-                if abs(steer_input) > 0.1 and current_speed > 0:
-                    # Recompensa MUY ALTA por seguir paredes
-                    wall_following_reward = 6.0 * abs(steer_input)
-                    reward += wall_following_reward
-            elif min_sensor < danger_distance:
-                # Penalización moderada en zona de peligro (menor que la de retroceder)
-                danger_penalty = 2.0 * ((danger_distance - min_sensor) / danger_distance)
-                reward -= danger_penalty
-        else:
-            # Penalización por estar muy lejos de obstáculos
-            reward -= 1.0
+        # Penalización gradual por proximidad frontal
+        if sensor_frontal < OPTIMAL_DISTANCE:
+            # Calcular qué tan cerca está del obstáculo como porcentaje
+            proximity_factor = (OPTIMAL_DISTANCE - sensor_frontal) / (OPTIMAL_DISTANCE - DANGER_DISTANCE)
+            proximity_factor = np.clip(proximity_factor, 0, 1)  # Asegurar que esté entre 0 y 1
+            
+            # Penalización gradual que aumenta mientras más cerca esté
+            proximity_penalty = -4.0 * proximity_factor
+            reward += proximity_penalty
         
-        # 3. Recompensa por comportamiento de navegación inteligente
-        # Si detecta obstáculo al frente, recompensar fuertemente el giro apropiado
-        if sensor_frontal < guarding_distance:
-            # Determinar el mejor lado para girar
-            if sensor_izq > sensor_der:
-                # Recompensar giro a la izquierda
-                if steer_input > 0:
-                    reward += 4.0 * steer_input
+        # Recompensas por acciones
+        if action_desc == "ADELANTE":
+            if sensor_frontal > OPTIMAL_DISTANCE:
+                # Recompensa máxima por avanzar cuando es completamente seguro
+                reward += 3.0
+            elif sensor_frontal > DANGER_DISTANCE:
+                # Recompensa reducida cuando se acerca a la distancia óptima
+                safe_factor = (sensor_frontal - DANGER_DISTANCE) / (OPTIMAL_DISTANCE - DANGER_DISTANCE)
+                reward += 2.0 * safe_factor
             else:
-                # Recompensar giro a la derecha
-                if steer_input < 0:
-                    reward += 4.0 * abs(steer_input)
+                # Penalización fuerte por avanzar en zona de peligro
+                reward -= 5.0
+                
+        elif action_desc == "REVERSA":
+            # Recompensar reversa solo cuando está muy cerca de un obstáculo
+            if sensor_frontal < DANGER_DISTANCE:
+                reward += 2.0
+            else:
+                # Penalización por reversa innecesaria
+                reward -= 2.0
+                
+        elif action_desc in ["GIRO_IZQUIERDA", "GIRO_DERECHA"]:
+            if sensor_frontal < OPTIMAL_DISTANCE:
+                # Recompensar giros cuando hay obstáculos cerca
+                if action_desc == "GIRO_IZQUIERDA" and sensor_izq > sensor_der:
+                    reward += 4.0  # Giro correcto (aumentado)
+                elif action_desc == "GIRO_DERECHA" and sensor_der > sensor_izq:
+                    reward += 4.0  # Giro correcto (aumentado)
+                else:
+                    reward -= 1.0  # Giro en la dirección menos óptima
+            else:
+                # Pequeña penalización por girar sin necesidad
+                reward -= 0.5
         
-        # Comparación de recompensas/penalizaciones:
-        # - Retroceder: -5.0 a -10.0
-        # - Mantener distancia óptima: hasta +8.0
-        # - Seguir paredes con giros: hasta +6.0
-        # - Giros apropiados cerca de obstáculos: hasta +4.0
-        # - Zona de peligro: -2.0 (menos que retroceder)
-        # - Lejos de obstáculos: -1.0
+        # Penalizaciones por situaciones extremadamente peligrosas
+        if min_sensor < DANGER_DISTANCE:
+            # Penalización severa por estar demasiado cerca de obstáculos
+            reward -= 3.0
+            
+        # Resumen de recompensas:
+        # Positivas:
+        # +2.0: Avanzar cuando es seguro
+        # +3.0: Girar en la dirección correcta cuando hay obstáculos
+        # +1.0: Retroceder cuando hay obstáculo muy cerca
+        
+        # Negativas:
+        # -3.0: Avanzar hacia un obstáculo
+        # -2.0: Retroceder sin necesidad
+        # -2.0: Estar demasiado cerca de obstáculos
+        # -1.0: Girar en la dirección menos óptima
+        # -0.5: Girar sin necesidad
         
         # Verificar terminación
         terminated = False
@@ -275,13 +278,6 @@ class CRTCarEnv(gym.Env):
             x = self.np_random.uniform(margin, MAP_SIZE - width - margin)
             y = self.np_random.uniform(margin, MAP_SIZE - height - margin)
             self.obstacles['rectangles'].append([x, y, width, height])
-        
-        # Generar círculos aleatorios
-        for _ in range(NUM_CIRCLES):
-            radius = self.np_random.uniform(MIN_OBSTACLE_SIZE/2, MAX_OBSTACLE_SIZE/2)
-            x = self.np_random.uniform(margin + radius, MAP_SIZE - radius - margin)
-            y = self.np_random.uniform(margin + radius, MAP_SIZE - radius - margin)
-            self.obstacles['circles'].append([x, y, radius])
 
     def _check_obstacle_collision(self, position):
         """
@@ -322,13 +318,9 @@ class CRTCarEnv(gym.Env):
             
         return True
 
-    def reset(self, seed=None, options=None):
-        """
-        Reinicia el entorno a un estado inicial.
-        """
+    def reset(self, seed=int | None, options=None):
         super().reset(seed=seed)
         
-        # Generar nuevos obstáculos
         self._generate_random_obstacles()
         
         # Encontrar una posición inicial válida para el coche
@@ -450,15 +442,14 @@ class CRTCarEnv(gym.Env):
         
         # Dibujar sensores
         sensor_readings = self._get_sensor_readings()
-        sensor_angles = [0, pi, pi/2, -pi/2]
-        guarding_distance = CAR_LENGTH * 1.2  # Distancia de guardia
+        sensor_angles = [0, pi, pi/3, -pi/3]  # [frontal, trasero, izquierdo, derecho]
         
         for reading, angle in zip(sensor_readings, sensor_angles):
             abs_angle = self.state['theta'] + angle
             
             # Punto donde termina la zona roja (umbral de guardia)
-            guard_x = car_pos[0] + cos(abs_angle) * guarding_distance
-            guard_y = car_pos[1] + sin(abs_angle) * guarding_distance
+            guard_x = car_pos[0] + cos(abs_angle) * DANGER_DISTANCE
+            guard_y = car_pos[1] + sin(abs_angle) * DANGER_DISTANCE
             
             # Punto final del sensor (donde detecta algo)
             end_x = car_pos[0] + cos(abs_angle) * reading

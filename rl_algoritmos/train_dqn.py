@@ -16,14 +16,14 @@ checkpoint_dir = "checkpoints"
 def signal_handler(sig, frame):
     """Maneja la interrupción Ctrl+C guardando los pesos antes de salir"""
     print('\nInterrumpiendo entrenamiento. Guardando checkpoint...')
-    if current_agent is not None:
+    if current_agent is not None and 'args' in globals():  # Verificar que args exista
         # Crear directorio si no existe
         os.makedirs(checkpoint_dir, exist_ok=True)
         
         # Guardar checkpoint de interrupción
         interrupt_checkpoint_path = os.path.join(
             checkpoint_dir,
-            f'dqn_interrupt_{datetime.now().strftime("%Y%m%d_%H%M%S")}.pth'
+            f'dqn_{args.tag}_interrupt_{datetime.now().strftime("%Y%m%d_%H%M")}.pth'
         )
         current_agent.save(interrupt_checkpoint_path)
         print(f'Checkpoint guardado en: {interrupt_checkpoint_path}')
@@ -33,20 +33,6 @@ def signal_handler(sig, frame):
 # Registrar el manejador de señales
 signal.signal(signal.SIGINT, signal_handler)
 
-def discretize_action(action_idx, num_speed_levels=3, num_steering_levels=5):
-    """
-    Convierte un índice de acción discreto en una acción continua.
-    """
-    # Crear una cuadrícula de acciones posibles
-    speeds = np.linspace(-1.0, 1.0, num_speed_levels)
-    steerings = np.linspace(-1.0, 1.0, num_steering_levels)
-    
-    # Calcular los índices de velocidad y dirección
-    speed_idx = action_idx // num_steering_levels
-    steering_idx = action_idx % num_steering_levels
-    
-    return np.array([speeds[speed_idx], steerings[steering_idx]], dtype=np.float32)
-
 def train_dqn(env_name='CRTCar-v0', 
               n_episodes=1000,
               max_t=1000,
@@ -54,7 +40,11 @@ def train_dqn(env_name='CRTCar-v0',
               eps_end=0.01,
               eps_decay=0.995,
               checkpoint_dir='checkpoints',
-              use_wandb=True):
+              use_wandb=True,
+              agent=None,
+              render_mode="human",  # Añadido parámetro para modo de renderizado
+              tag="default",  # Añadido parámetro para el tag
+              debug=False):  # Añadido parámetro para modo debug
     global current_agent  # Declarar uso de variable global
     print(f"Creating environment: {env_name}")
     """
@@ -69,21 +59,8 @@ def train_dqn(env_name='CRTCar-v0',
         eps_decay: Factor de decaimiento de epsilon
         checkpoint_dir: Directorio para guardar los checkpoints
         use_wandb: Si se debe usar Weights & Biases para seguimiento
+        agent: Agente pre-entrenado (opcional)
     """
-    # Crear el entorno con visualización
-    env = gym.make(env_name, render_mode="human")
-    
-    # Configurar el agente
-    # Obtener el tamaño del espacio de estados del entorno real
-    test_obs, _ = env.reset()
-    if isinstance(test_obs, dict):
-        # Si la observación es un diccionario, aplanarla
-        state_size = test_obs["orientation"].shape[0] + test_obs["sensors"].shape[0]
-    else:
-        state_size = test_obs.shape[0]
-    
-    action_size = 15  # 3 niveles de velocidad * 5 niveles de dirección
-    agent = DQNAgent(state_size=state_size, action_size=action_size)
     current_agent = agent  # Asignar el agente a la variable global
     
     # Configurar W&B
@@ -114,6 +91,22 @@ def train_dqn(env_name='CRTCar-v0',
     
     print("Iniciando entrenamiento...")
     
+    # Crear el entorno de entrenamiento
+    env = gym.make(env_name, render_mode=render_mode)
+    print(f"Render mode: {render_mode}")
+    
+    if debug:
+        print("\n=== MODO DEBUG ACTIVADO ===")
+        print(f"Estado del agente:")
+        print(f"- Red neuronal: {agent.qnetwork_local}")
+        print(f"- Tamaño del buffer de memoria: {agent.memory.memory.maxlen}")
+        print(f"- Batch size: {agent.batch_size}")
+        print(f"- Gamma: {agent.gamma}")
+        print(f"- Tau: {agent.tau}")
+        print(f"- Learning rate: {agent.optimizer.param_groups[0]['lr']}")
+        print("\nPresiona Enter para continuar...")
+        input()
+    
     for i_episode in range(1, n_episodes+1):
         state, _ = env.reset()
         if isinstance(state, dict):
@@ -124,14 +117,27 @@ def train_dqn(env_name='CRTCar-v0',
         for t in range(max_t):
             # Seleccionar acción
             action_idx = agent.act(state, eps)
-            action = discretize_action(action_idx)
             
-            # Ejecutar acción
-            next_state, reward, terminated, truncated, _ = env.step(action)
+            # Ejecutar acción discreta directamente
+            next_state, reward, terminated, truncated, info = env.step(action_idx)
             if isinstance(next_state, dict):
                 # Aplanar la siguiente observación si es un diccionario
                 next_state = np.concatenate([next_state["orientation"], next_state["sensors"]])
             done = terminated or truncated
+            
+            # Log detallado solo en modo human y cada 50 pasos o cuando hay eventos importantes
+            if render_mode == "human" and (t % 50 == 0 or float(reward) > 5.0 or done):
+                orientation = state[0]  # Primer elemento es la orientación
+                sensors = state[1:5]    # Los siguientes 4 son lecturas de sensores
+                
+                print(f"\n--- Estado del Agente (Ep {i_episode}, Paso {t}) ---")
+                print(f"Sensores [F,T,I,D]: {sensors}")
+                print(f"Orientación: {orientation:.2f} rad ({np.degrees(orientation):.1f}°)")
+                print(f"Acción Discreta: #{action_idx}")
+                print(f"Recompensa: {reward:.2f}")
+                if done:
+                    print(f"Episodio terminado por {'(Colisión)' if terminated else '(Tiempo)'}")
+                print("-" * 50)
             
             # Guardar experiencia y aprender
             agent.step(state, action_idx, reward, next_state, done)
@@ -149,16 +155,24 @@ def train_dqn(env_name='CRTCar-v0',
         scores.append(score)
         
         # Imprimir progreso
-        print(f'\rEpisodio {i_episode}\tPuntuación: {score:.2f}\tEpsilon: {eps:.2f}', end="")
-        if i_episode % 100 == 0:
-            print(f'\rEpisodio {i_episode}\tPuntuación media: {np.mean(scores[-100:]):.2f}')
+        if render_mode == "human":
+            print(f'\rEpisodio {i_episode}\tPuntuación: {score:.2f}\tEpsilon: {eps:.2f}', end="")
+            if i_episode % 100 == 0:
+                print(f'\rEpisodio {i_episode}\tPuntuación media: {np.mean(scores[-100:]):.2f}')
+        else:
+            # En modo no visual, imprimir actualizaciones más concisas
+            if i_episode % 10 == 0:  # Actualizar cada 10 episodios
+                mean_score = np.mean(scores[-100:]) if len(scores) >= 100 else np.mean(scores)
+                print(f'\rEp: {i_episode}/{n_episodes} | Score: {score:.1f} | Avg: {mean_score:.1f} | ε: {eps:.2f}', end="")
             
-            # Guardar checkpoint
-            checkpoint_path = os.path.join(
-                checkpoint_dir, 
-                f'dqn_checkpoint_episode_{i_episode}.pth'
-            )
-            agent.save(checkpoint_path)
+            # Guardar checkpoint cada 250 episodios
+            if i_episode % 250 == 0:
+                checkpoint_path = os.path.join(
+                    checkpoint_dir, 
+                    f'dqn_{tag}_episode_{i_episode}.pth'
+                )
+                agent.save(checkpoint_path)
+                print(f"\nGuardando checkpoint en episodio {i_episode}")
         
         # Logging en W&B
         if use_wandb:
@@ -172,27 +186,105 @@ def train_dqn(env_name='CRTCar-v0',
     # Guardar modelo final
     final_checkpoint_path = os.path.join(
         checkpoint_dir,
-        f'dqn_final_{datetime.now().strftime("%Y%m%d_%H%M%S")}.pth'
+        f'dqn_{tag}_final_{datetime.now().strftime("%Y%m%d_%H%M%S")}.pth'
     )
     agent.save(final_checkpoint_path)
     
     if use_wandb:
         wandb.finish()
     
+    # Cerrar el entorno
+    env.close()
+    
     return scores, agent
 
 if __name__ == "__main__":
+    import argparse
+    
+    # Configurar el parser de argumentos
+    parser = argparse.ArgumentParser(description='Entrenamiento del agente DQN')
+    parser.add_argument('--checkpoint', type=str, help='Ruta al archivo de checkpoint para continuar el entrenamiento')
+    parser.add_argument('--tag', type=str, default='default', help='Etiqueta para identificar al agente en los checkpoints')
+    parser.add_argument('--episodes', type=int, default=1000, help='Número de episodios de entrenamiento')
+    parser.add_argument('--epsilon', type=float, default=1.0, help='Valor inicial de epsilon')
+    parser.add_argument('--render', action='store_true', help='Activar visualización del entrenamiento')
+    parser.add_argument('--debug', action='store_true', help='Activa modo debug con pausas para verificación')
+    args = parser.parse_args()
+    
     # Configuración del experimento
     config = {
-        "env_name": "CRTCar-v0",  # Explicitly set the environment name
-        "n_episodes": 1000,
+        "env_name": "CRTCar-v0",
+        "n_episodes": args.episodes,
         "max_t": 1000,
-        "eps_start": 1.0,
+        "eps_start": args.epsilon,  # Usar el epsilon proporcionado
         "eps_end": 0.01,
         "eps_decay": 0.995,
         "checkpoint_dir": "checkpoints",
-        "use_wandb": False  # Desactivado para no usar W&B
+        "use_wandb": False,
+        "render_mode": "human" if args.render else None,  # Modo de renderizado según el argumento
+        "tag": args.tag,  # Agregar el tag a la configuración
+        "debug": args.debug  # Modo debug
     }
     
+    # Crear el entorno para obtener los tamaños de estado y acción
+    env = gym.make(config["env_name"], render_mode=None)
+    test_obs, _ = env.reset(seed=42)
+    if isinstance(test_obs, dict):
+        state_size = test_obs["orientation"].shape[0] + test_obs["sensors"].shape[0]
+    else:
+        state_size = test_obs.shape[0]
+    action_size = env.action_space.n
+    env.close()  # Cerrar el entorno temporal
+    
+    # Crear el agente
+    agent = DQNAgent(state_size=state_size, action_size=action_size)
+    
+    # Actualizar la configuración para incluir el agente
+    config["agent"] = agent
+    
+    # Función para encontrar el checkpoint más reciente con un tag
+    def find_latest_checkpoint(tag):
+        if not os.path.exists(config["checkpoint_dir"]):
+            return None
+            
+        checkpoints = []
+        for file in os.listdir(config["checkpoint_dir"]):
+            if file.startswith(f'dqn_{tag}_') and file.endswith('.pth'):
+                path = os.path.join(config["checkpoint_dir"], file)
+                checkpoints.append((path, os.path.getmtime(path)))
+                
+        if not checkpoints:
+            return None
+            
+        # Ordenar por tiempo de modificación y obtener el más reciente
+        latest_checkpoint = sorted(checkpoints, key=lambda x: x[1], reverse=True)[0][0]
+        return latest_checkpoint
+
+    # Cargar checkpoint
+    checkpoint_path = args.checkpoint
+    if not checkpoint_path:
+        checkpoint_path = find_latest_checkpoint(args.tag)
+        
+    if checkpoint_path:
+        try:
+            print(f"Cargando checkpoint: {checkpoint_path}")
+            agent.load(checkpoint_path)
+            print("Checkpoint cargado exitosamente")
+            
+            if args.debug:
+                print("\n=== VERIFICACIÓN DE CHECKPOINT ===")
+                print("Información del modelo cargado:")
+                print(f"- Archivo: {checkpoint_path}")
+                print(f"- Redes disponibles: {[name for name, _ in agent.qnetwork_local.named_parameters()]}")
+                print("\nPresiona Enter para continuar con el entrenamiento...")
+                input()
+                
+        except Exception as e:
+            print(f"Error al cargar el checkpoint: {e}")
+            exit(1)
+    else:
+        print(f"No se encontró ningún checkpoint con el tag '{args.tag}'. Iniciando nuevo entrenamiento.")
+    
     # Entrenar el agente
+    current_agent = agent  # Para el manejador de señales
     scores, agent = train_dqn(**config)
