@@ -13,12 +13,12 @@ MAX_STEER_ANGLE = pi / 4  # 45 grados
 SENSOR_RANGE = 200.0  # Rango máximo de los sensores
 
 # Distancias críticas para los sensores (en función del largo del carro)
-DANGER_DISTANCE = CAR_LENGTH * 2.5     # Zona de peligro inmediato
-OPTIMAL_DISTANCE = CAR_LENGTH * 3.5     # Distancia óptima para seguir paredes
+DANGER_DISTANCE = CAR_LENGTH * 3.0     # Zona de peligro inmediato
+OPTIMAL_DISTANCE = CAR_LENGTH * 4.5     # Distancia óptima para seguir paredes
 GUARDING_DISTANCE = SENSOR_RANGE    # Distancia de monitoreo
 
 # Parámetros de los obstáculos
-NUM_RECTANGLES = 5  # Número de obstáculos rectangulares
+NUM_RECTANGLES = 15  # Número de obstáculos rectangulares
 MIN_OBSTACLE_SIZE = 30.0  # Tamaño mínimo de los obstáculos
 MAX_OBSTACLE_SIZE = 75.0  # Tamaño máximo de los obstáculos
 
@@ -41,7 +41,7 @@ class CRTCarEnv(gym.Env):
         # Contador de pasos para el episodio actual
         self.step_count = 0
         # Máximo número de pasos por episodio (30 segundos a 30 FPS)
-        self.max_steps = 30 * self.metadata["render_fps"]
+        self.max_steps = 60 * self.metadata["render_fps"]
 
         # Configurar el espacio de acciones discreto
         self.discrete_actions = DiscreteActionSpace()
@@ -82,7 +82,7 @@ class CRTCarEnv(gym.Env):
         """
         readings = np.zeros(4)
         #[frontal, trasero, izquierdo, derecho]
-        sensor_angles = [0, pi, pi/3, -pi/3]
+        sensor_angles = [0, pi, pi/6, -pi/6]
         
         for i, angle in enumerate(sensor_angles):
             abs_angle = self.state['theta'] + angle
@@ -188,21 +188,22 @@ class CRTCarEnv(gym.Env):
         
         # Penalización gradual por proximidad frontal
         if sensor_frontal < OPTIMAL_DISTANCE:
-            # Calcular qué tan cerca está del obstáculo como porcentaje
+            # Calcular qué tan cerca está del obstáculo
             proximity_factor = (OPTIMAL_DISTANCE - sensor_frontal) / (OPTIMAL_DISTANCE - DANGER_DISTANCE)
             proximity_factor = np.clip(proximity_factor, 0, 1)  # Asegurar que esté entre 0 y 1
             
-            # Detectar si el agente se está acercando de frente (comportamiento suicida)
+            # Penalización exponencial por proximidad
+            base_penalty = -5.0
+            proximity_penalty = base_penalty * (proximity_factor ** 2)  # Penalización cuadrática
+            
+            # Detectar comportamiento suicida (acercamiento frontal)
             is_frontal_approach = (sensor_frontal < OPTIMAL_DISTANCE and 
                                 sensor_izq > OPTIMAL_DISTANCE and 
                                 sensor_der > OPTIMAL_DISTANCE)
             
-            # Penalización base por proximidad
-            proximity_penalty = -8.0 * proximity_factor  # Aumentada de -4.0 a -8.0
-            
-            # Penalización extra por aproximación frontal
-            if is_frontal_approach:
-                proximity_penalty *= 2.0  # Doble penalización por acercamiento frontal
+            # Detectar si se está moviendo hacia el obstáculo
+            if action_desc == "ADELANTE" and is_frontal_approach:
+                proximity_penalty *= 3.0  # Triple penalización por avanzar directamente hacia un obstáculo
                 if self.render_mode == "human":
                     print("\n¡Alerta! Comportamiento suicida detectado")
             
@@ -210,79 +211,96 @@ class CRTCarEnv(gym.Env):
         
         # Recompensas por acciones
         if action_desc == "ADELANTE":
+            # Zona segura
             if sensor_frontal > OPTIMAL_DISTANCE:
-                # Recompensa por avanzar cuando es completamente seguro
-                # y hay espacio a los lados (navegación segura)
-                if sensor_izq > DANGER_DISTANCE and sensor_der > DANGER_DISTANCE:
-                    reward += 3.0
-                else:
-                    reward += 1.0  # Recompensa reducida si los lados están cerca
+                safe_space = min(sensor_izq, sensor_der) / SENSOR_RANGE
+                base_reward = 2.0
+                space_bonus = safe_space * 2.0  # Bonus por espacio libre a los lados
+                reward += base_reward + space_bonus
             else:
-                # Penalización muy fuerte por avanzar en zona de peligro
-                reward -= 10.0  # Aumentada de -5.0 a -10.0
+                # Penalización progresiva por avanzar hacia el peligro
+                danger_factor = (OPTIMAL_DISTANCE - sensor_frontal) / OPTIMAL_DISTANCE
+                penalty = -15.0 * danger_factor  # Penalización más severa
+                reward += penalty
                 
         elif action_desc == "REVERSA":
-            # Recompensar reversa cuando está cerca de un obstáculo frontal
             if sensor_frontal < OPTIMAL_DISTANCE:
-                reversa_reward = 3.0  # Base reward for reversa
+                # Recompensa por alejarse del peligro
+                danger_factor = (OPTIMAL_DISTANCE - sensor_frontal) / OPTIMAL_DISTANCE
+                reversa_reward = 4.0 * danger_factor
                 
-                # Bonus extra si es una situación de "rescate" (muy cerca del obstáculo)
+                # Bonus extra por evitar colisión inminente
                 if sensor_frontal < DANGER_DISTANCE:
-                    reversa_reward += 2.0
+                    reversa_reward *= 1.5
                     
                 reward += reversa_reward
             else:
-                # Penalización por reversa innecesaria
-                reward -= 2.0
+                # Penalización moderada por reversa innecesaria
+                # Menor penalización si hay obstáculos cercanos a los lados
+                if min(sensor_izq, sensor_der) < OPTIMAL_DISTANCE:
+                    reward -= 1.0
+                else:
+                    reward -= 2.0
                 
         elif action_desc in ["GIRO_IZQUIERDA", "GIRO_DERECHA"]:
-            if sensor_frontal < OPTIMAL_DISTANCE:
-                # Aumentar significativamente la recompensa por giros evasivos
-                if action_desc == "GIRO_IZQUIERDA":
-                    # Verificar si hay más espacio a la izquierda
-                    if sensor_izq > sensor_der:
-                        space_diff = (sensor_izq - sensor_der) / SENSOR_RANGE
-                        reward += 8.0 + (4.0 * space_diff)  # Recompensa base + bonus por diferencia
+            # Detectar si es necesario girar
+            need_to_turn = sensor_frontal < OPTIMAL_DISTANCE * 1.5
+            
+            if need_to_turn:
+                # Determinar la dirección óptima de giro
+                space_left = sensor_izq
+                space_right = sensor_der
+                turning_left = action_desc == "GIRO_IZQUIERDA"
+                
+                # Calcular el diferencial de espacio normalizado
+                space_diff = abs(space_left - space_right) / SENSOR_RANGE
+                
+                if turning_left:
+                    if space_left > space_right:
+                        # Giro correcto hacia el espacio más amplio
+                        base_reward = 5.0
+                        space_bonus = space_diff * 5.0
+                        urgency_bonus = (OPTIMAL_DISTANCE - sensor_frontal) / OPTIMAL_DISTANCE
+                        reward += base_reward + space_bonus + (urgency_bonus * 3.0)
                     else:
-                        reward -= 3.0  # Penalización más fuerte por girar hacia el lado con menos espacio
-                        
-                elif action_desc == "GIRO_DERECHA":
-                    # Verificar si hay más espacio a la derecha
-                    if sensor_der > sensor_izq:
-                        space_diff = (sensor_der - sensor_izq) / SENSOR_RANGE
-                        reward += 8.0 + (4.0 * space_diff)  # Recompensa base + bonus por diferencia
+                        # Giro hacia el espacio más reducido
+                        penalty_factor = space_diff + 0.5  # Penalización base + diferencia
+                        reward -= 4.0 * penalty_factor
+                else:  # Girando a la derecha
+                    if space_right > space_left:
+                        # Giro correcto hacia el espacio más amplio
+                        base_reward = 5.0
+                        space_bonus = space_diff * 5.0
+                        urgency_bonus = (OPTIMAL_DISTANCE - sensor_frontal) / OPTIMAL_DISTANCE
+                        reward += base_reward + space_bonus + (urgency_bonus * 3.0)
                     else:
-                        reward -= 3.0  # Penalización más fuerte por girar hacia el lado con menos espacio
+                        # Giro hacia el espacio más reducido
+                        penalty_factor = space_diff + 0.5
+                        reward -= 4.0 * penalty_factor
             else:
-                # Pequeña penalización por girar sin necesidad, pero menor si hay obstáculos cercanos
-                if min_sensor < OPTIMAL_DISTANCE * 1.5:  # Dar más margen para giros preventivos
-                    reward -= 0.2  # Penalización reducida si hay obstáculos relativamente cerca
-                else:
-                    reward -= 1.0  # Penalización aumentada por giro completamente innecesario
+                # Giro innecesario - penalización variable según la proximidad de obstáculos
+                closest_obstacle = min(sensor_frontal, sensor_izq, sensor_der)
+                safety_factor = closest_obstacle / OPTIMAL_DISTANCE
+                safety_factor = np.clip(safety_factor, 0, 1)
+                
+                # Penalización más suave si hay obstáculos cercanos
+                penalty = -2.0 * safety_factor
+                reward += penalty
         
         # Penalizaciones por situaciones extremadamente peligrosas
         if min_sensor < DANGER_DISTANCE:
-            # Penalización severa por estar demasiado cerca de obstáculos
-            reward -= 3.0
-            
-        # Resumen de recompensas:
-        # Positivas:
-        # +2.0: Avanzar cuando es seguro
-        # +3.0: Girar en la dirección correcta cuando hay obstáculos
-        # +1.0: Retroceder cuando hay obstáculo muy cerca
-        
-        # Negativas:
-        # -3.0: Avanzar hacia un obstáculo
-        # -2.0: Retroceder sin necesidad
-        # -2.0: Estar demasiado cerca de obstáculos
-        # -1.0: Girar en la dirección menos óptima
-        # -0.5: Girar sin necesidad
+            # Penalización exponencial por proximidad al peligro
+            danger_factor = (DANGER_DISTANCE - min_sensor) / DANGER_DISTANCE
+            danger_penalty = -5.0 * (danger_factor ** 2)  # Penalización cuadrática
+            reward += danger_penalty
         
         # Incrementar el contador de pasos
         self.step_count += 1
         
-        # Recompensa por supervivencia (aumenta con el tiempo)
-        survival_reward = 0.1 * (self.step_count / self.max_steps)
+        # Recompensa por supervivencia (curva logarítmica)
+        # La recompensa crece más rápido al principio y se estabiliza con el tiempo
+        normalized_time = self.step_count / self.max_steps
+        survival_reward = 0.5 * np.log(1 + 10 * normalized_time)  # Base 0.5, factor 10 para ajustar la curva
         reward += survival_reward
         
         # Verificar terminación
@@ -291,18 +309,31 @@ class CRTCarEnv(gym.Env):
         
         # Terminar si hay colisión con pared u obstáculo
         if min_sensor < self.car_width:
-            # Penalización proporcional: es más severa si muere pronto
-            early_death_penalty = 100.0 * (1 - self.step_count / self.max_steps)
+            # Penalización exponencial basada en el tiempo de supervivencia
+            # La penalización es máxima al principio y disminuye exponencialmente
+            progress = self.step_count / self.max_steps
+            base_penalty = 150.0  # Penalización base aumentada
+            early_death_penalty = base_penalty * np.exp(-3 * progress)  # Factor -3 para ajustar la curva
+            
+            # Penalización extra si la colisión fue frontal
+            if sensor_frontal == min_sensor and action_desc == "ADELANTE":
+                early_death_penalty *= 1.5  # 50% extra por colisión frontal intencional
+            
             reward -= early_death_penalty
             if self.render_mode == "human":
                 print(f"\nColisión detectada! Penalización: {early_death_penalty:.2f}")
                 print(f"Tiempo de supervivencia: {self.step_count} pasos")
+                if sensor_frontal == min_sensor and action_desc == "ADELANTE":
+                    print("¡Colisión frontal intencional detectada!")
             terminated = True
         
         # Terminar si sale del mapa
         if not (0 <= self.state['x'] <= MAP_SIZE and 0 <= self.state['y'] <= MAP_SIZE):
-            # Penalización proporcional por salir del mapa
-            early_death_penalty = 100.0 * (1 - self.step_count / self.max_steps)
+            # Penalización similar a la colisión pero ligeramente menor
+            progress = self.step_count / self.max_steps
+            base_penalty = 120.0  # Menor que la penalización por colisión
+            early_death_penalty = base_penalty * np.exp(-3 * progress)
+            
             reward -= early_death_penalty
             if self.render_mode == "human":
                 print(f"\nSalió del mapa! Penalización: {early_death_penalty:.2f}")
@@ -539,7 +570,7 @@ class CRTCarEnv(gym.Env):
         
         # Dibujar sensores
         sensor_readings = self._get_sensor_readings()
-        sensor_angles = [0, pi, pi/3, -pi/3]  # [frontal, trasero, izquierdo, derecho]
+        sensor_angles = [0, pi, pi/6, -pi/6]  # [frontal, trasero, izquierdo, derecho]
         
         for reading, angle in zip(sensor_readings, sensor_angles):
             abs_angle = self.state['theta'] + angle
