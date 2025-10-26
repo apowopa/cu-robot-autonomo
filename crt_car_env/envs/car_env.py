@@ -192,43 +192,73 @@ class CRTCarEnv(gym.Env):
             proximity_factor = (OPTIMAL_DISTANCE - sensor_frontal) / (OPTIMAL_DISTANCE - DANGER_DISTANCE)
             proximity_factor = np.clip(proximity_factor, 0, 1)  # Asegurar que esté entre 0 y 1
             
-            # Penalización gradual que aumenta mientras más cerca esté
-            proximity_penalty = -4.0 * proximity_factor
+            # Detectar si el agente se está acercando de frente (comportamiento suicida)
+            is_frontal_approach = (sensor_frontal < OPTIMAL_DISTANCE and 
+                                sensor_izq > OPTIMAL_DISTANCE and 
+                                sensor_der > OPTIMAL_DISTANCE)
+            
+            # Penalización base por proximidad
+            proximity_penalty = -8.0 * proximity_factor  # Aumentada de -4.0 a -8.0
+            
+            # Penalización extra por aproximación frontal
+            if is_frontal_approach:
+                proximity_penalty *= 2.0  # Doble penalización por acercamiento frontal
+                if self.render_mode == "human":
+                    print("\n¡Alerta! Comportamiento suicida detectado")
+            
             reward += proximity_penalty
         
         # Recompensas por acciones
         if action_desc == "ADELANTE":
             if sensor_frontal > OPTIMAL_DISTANCE:
-                # Recompensa máxima por avanzar cuando es completamente seguro
-                reward += 3.0
-            elif sensor_frontal > DANGER_DISTANCE:
-                # Recompensa reducida cuando se acerca a la distancia óptima
-                safe_factor = (sensor_frontal - DANGER_DISTANCE) / (OPTIMAL_DISTANCE - DANGER_DISTANCE)
-                reward += 2.0 * safe_factor
+                # Recompensa por avanzar cuando es completamente seguro
+                # y hay espacio a los lados (navegación segura)
+                if sensor_izq > DANGER_DISTANCE and sensor_der > DANGER_DISTANCE:
+                    reward += 3.0
+                else:
+                    reward += 1.0  # Recompensa reducida si los lados están cerca
             else:
-                # Penalización fuerte por avanzar en zona de peligro
-                reward -= 5.0
+                # Penalización muy fuerte por avanzar en zona de peligro
+                reward -= 10.0  # Aumentada de -5.0 a -10.0
                 
         elif action_desc == "REVERSA":
-            # Recompensar reversa solo cuando está muy cerca de un obstáculo
-            if sensor_frontal < DANGER_DISTANCE:
-                reward += 2.0
+            # Recompensar reversa cuando está cerca de un obstáculo frontal
+            if sensor_frontal < OPTIMAL_DISTANCE:
+                reversa_reward = 3.0  # Base reward for reversa
+                
+                # Bonus extra si es una situación de "rescate" (muy cerca del obstáculo)
+                if sensor_frontal < DANGER_DISTANCE:
+                    reversa_reward += 2.0
+                    
+                reward += reversa_reward
             else:
                 # Penalización por reversa innecesaria
                 reward -= 2.0
                 
         elif action_desc in ["GIRO_IZQUIERDA", "GIRO_DERECHA"]:
             if sensor_frontal < OPTIMAL_DISTANCE:
-                # Recompensar giros cuando hay obstáculos cerca
-                if action_desc == "GIRO_IZQUIERDA" and sensor_izq > sensor_der:
-                    reward += 4.0  # Giro correcto (aumentado)
-                elif action_desc == "GIRO_DERECHA" and sensor_der > sensor_izq:
-                    reward += 4.0  # Giro correcto (aumentado)
-                else:
-                    reward -= 1.0  # Giro en la dirección menos óptima
+                # Aumentar significativamente la recompensa por giros evasivos
+                if action_desc == "GIRO_IZQUIERDA":
+                    # Verificar si hay más espacio a la izquierda
+                    if sensor_izq > sensor_der:
+                        space_diff = (sensor_izq - sensor_der) / SENSOR_RANGE
+                        reward += 8.0 + (4.0 * space_diff)  # Recompensa base + bonus por diferencia
+                    else:
+                        reward -= 3.0  # Penalización más fuerte por girar hacia el lado con menos espacio
+                        
+                elif action_desc == "GIRO_DERECHA":
+                    # Verificar si hay más espacio a la derecha
+                    if sensor_der > sensor_izq:
+                        space_diff = (sensor_der - sensor_izq) / SENSOR_RANGE
+                        reward += 8.0 + (4.0 * space_diff)  # Recompensa base + bonus por diferencia
+                    else:
+                        reward -= 3.0  # Penalización más fuerte por girar hacia el lado con menos espacio
             else:
-                # Pequeña penalización por girar sin necesidad
-                reward -= 0.5
+                # Pequeña penalización por girar sin necesidad, pero menor si hay obstáculos cercanos
+                if min_sensor < OPTIMAL_DISTANCE * 1.5:  # Dar más margen para giros preventivos
+                    reward -= 0.2  # Penalización reducida si hay obstáculos relativamente cerca
+                else:
+                    reward -= 1.0  # Penalización aumentada por giro completamente innecesario
         
         # Penalizaciones por situaciones extremadamente peligrosas
         if min_sensor < DANGER_DISTANCE:
@@ -262,7 +292,7 @@ class CRTCarEnv(gym.Env):
         # Terminar si hay colisión con pared u obstáculo
         if min_sensor < self.car_width:
             # Penalización proporcional: es más severa si muere pronto
-            early_death_penalty = 20.0 * (1 - self.step_count / self.max_steps)
+            early_death_penalty = 100.0 * (1 - self.step_count / self.max_steps)
             reward -= early_death_penalty
             if self.render_mode == "human":
                 print(f"\nColisión detectada! Penalización: {early_death_penalty:.2f}")
@@ -272,7 +302,7 @@ class CRTCarEnv(gym.Env):
         # Terminar si sale del mapa
         if not (0 <= self.state['x'] <= MAP_SIZE and 0 <= self.state['y'] <= MAP_SIZE):
             # Penalización proporcional por salir del mapa
-            early_death_penalty = 20.0 * (1 - self.step_count / self.max_steps)
+            early_death_penalty = 100.0 * (1 - self.step_count / self.max_steps)
             reward -= early_death_penalty
             if self.render_mode == "human":
                 print(f"\nSalió del mapa! Penalización: {early_death_penalty:.2f}")
@@ -421,8 +451,10 @@ class CRTCarEnv(gym.Env):
         # Dibujar el coche
         car_pos = (int(self.state['x']), int(self.state['y']))
         
-        # Hacer el carro más rectangular (reducir el ancho)
-        car_width = self.car_width * 0.7  # Reducir el ancho para hacerlo más rectangular
+        # Dimensiones del carro
+        car_width = self.car_width * 0.7  # Ancho del cuerpo
+        wheel_width = car_width * 0.4     # Ancho de las ruedas
+        wheel_length = CAR_LENGTH * 0.2   # Largo de las ruedas
         
         # Puntos del coche (forma rectangular)
         car_points = [
@@ -432,7 +464,7 @@ class CRTCarEnv(gym.Env):
             (-CAR_LENGTH/2, car_width),     # Atrás derecha
         ]
         
-        # Rotar puntos del cuerpo principal
+        # Rotar y dibujar el cuerpo principal
         rotated_points = []
         for x, y in car_points:
             rx = x * cos(self.state['theta']) - y * sin(self.state['theta'])
@@ -445,30 +477,65 @@ class CRTCarEnv(gym.Env):
         # Dibujar cuerpo principal del coche
         pygame.draw.polygon(canvas, (0, 0, 255), rotated_points)  # Azul
         
-        # Puntos para el rectángulo rojo del frente
-        front_width = car_width * 0.8  # Un poco más estrecho que el cuerpo
-        front_length = CAR_LENGTH * 0.2  # 20% del largo total
-        front_offset = CAR_LENGTH/2 - front_length/2  # Posicionar en el frente
-        
-        front_points = [
-            (front_offset, -front_width),                 # Izquierda atrás
-            (front_offset + front_length, -front_width),  # Izquierda frente
-            (front_offset + front_length, front_width),   # Derecha frente
-            (front_offset, front_width),                  # Derecha atrás
+        # Definir posiciones de las ruedas
+        wheel_positions = [
+            (-CAR_LENGTH/3, -car_width-wheel_width/2),  # Izquierda trasera
+            (CAR_LENGTH/3, -car_width-wheel_width/2),   # Izquierda delantera
+            (-CAR_LENGTH/3, car_width+wheel_width/2),   # Derecha trasera
+            (CAR_LENGTH/3, car_width+wheel_width/2),    # Derecha delantera
         ]
         
-        # Rotar puntos del frente
-        rotated_front_points = []
-        for x, y in front_points:
+        # Dibujar las ruedas
+        for wx, wy in wheel_positions:
+            wheel_points = [
+                (wx - wheel_length/2, wy - wheel_width/2),
+                (wx + wheel_length/2, wy - wheel_width/2),
+                (wx + wheel_length/2, wy + wheel_width/2),
+                (wx - wheel_length/2, wy + wheel_width/2),
+            ]
+            
+            rotated_wheel = []
+            for x, y in wheel_points:
+                rx = x * cos(self.state['theta']) - y * sin(self.state['theta'])
+                ry = x * sin(self.state['theta']) + y * cos(self.state['theta'])
+                rotated_wheel.append((
+                    int(car_pos[0] + rx),
+                    int(car_pos[1] + ry)
+                ))
+            pygame.draw.polygon(canvas, (0, 0, 0), rotated_wheel)  # Ruedas negras
+        
+        # Dibujar la cabeza semicircular (roja)
+        head_radius = car_width * 1.1  # Radio de la cabeza
+        head_center_x = CAR_LENGTH/2
+        head_center_y = 0
+        
+        # Rotar el centro de la cabeza
+        head_rx = head_center_x * cos(self.state['theta']) - head_center_y * sin(self.state['theta'])
+        head_ry = head_center_x * sin(self.state['theta']) + head_center_y * cos(self.state['theta'])
+        head_center = (int(car_pos[0] + head_rx), int(car_pos[1] + head_ry))
+        
+        # Calcular los puntos para el semicírculo
+        num_points = 12  # Número de puntos para aproximar el semicírculo
+        head_points = [(head_center_x, 0)]  # Punto central
+        
+        for i in range(num_points + 1):
+            angle = -pi/2 + (i * pi) / num_points  # De -90 a 90 grados
+            x = head_center_x + head_radius * cos(angle)
+            y = head_radius * sin(angle)
+            head_points.append((x, y))
+        
+        # Rotar y convertir los puntos de la cabeza
+        rotated_head = []
+        for x, y in head_points:
             rx = x * cos(self.state['theta']) - y * sin(self.state['theta'])
             ry = x * sin(self.state['theta']) + y * cos(self.state['theta'])
-            rotated_front_points.append((
+            rotated_head.append((
                 int(car_pos[0] + rx),
                 int(car_pos[1] + ry)
             ))
         
-        # Dibujar el rectángulo rojo del frente
-        pygame.draw.polygon(canvas, (255, 0, 0), rotated_front_points)  # Rojo
+        # Dibujar la cabeza semicircular
+        pygame.draw.polygon(canvas, (255, 0, 0), rotated_head)  # Rojo
         
         # Dibujar sensores
         sensor_readings = self._get_sensor_readings()
