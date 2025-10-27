@@ -2,6 +2,10 @@
 
 Este proyecto implementa un entorno de simulación 2D para el entrenamiento de un robot autónomo utilizando Deep Reinforcement Learning (DRL). El robot está equipado con sensores de distancia y debe aprender a navegar evitando obstáculos.
 
+## Demo del Proyecto
+
+https://user-images.githubusercontent.com/apowopa/cu-robot-autonomo/assets/demo.mp4
+
 ## Características
 
 -  Simulación 2D de un robot con dirección Ackermann
