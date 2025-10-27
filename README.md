@@ -4,7 +4,7 @@ Este proyecto implementa un entorno de simulación 2D para el entrenamiento de u
 
 ## Demo del Proyecto
 
-https://user-images.githubusercontent.com/apowopa/cu-robot-autonomo/assets/demo.mp4
+https://github.com/user-attachments/assets/de5623ab-79f2-4ddb-9c0d-f0991bbacecb
 
 ## Características
 
