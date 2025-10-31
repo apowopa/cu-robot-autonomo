@@ -63,7 +63,7 @@ class RobotController:
         xshut_pins = {
             'frontal': 4,
             'derecha': 17,
-            'izquierda': 27
+            'izquierda': 22
         }
         
         shutdown_pins = {}
@@ -102,10 +102,20 @@ class RobotController:
         """Carga el agente DQN desde un checkpoint."""
         print(f"Cargando agente desde {checkpoint_path}...")
         
-        # Crear el agente
-        state_size = 12  # 3 sensores + posición (x, y, theta) + objetivo (x, y) + velocidad + info adicional
+        # Cargar el checkpoint primero para detectar las dimensiones
+        checkpoint = torch.load(checkpoint_path, map_location='cpu')
+        
+        # Detectar el tamaño del estado desde el checkpoint
+        # La primera capa (fc1.weight) tiene forma [hidden_size, state_size]
+        state_size = checkpoint['local']['fc1.weight'].shape[1]
         action_size = self.action_space.n
         
+        print(f"Modelo detectado: state_size={state_size}, action_size={action_size}")
+        
+        # Guardar el state_size para usarlo en get_state()
+        self.state_size = state_size
+        
+        # Crear el agente con las dimensiones correctas
         self.agent = DQNAgent(
             state_size=state_size,
             action_size=action_size,
@@ -116,8 +126,7 @@ class RobotController:
             learning_rate=0.001
         )
         
-        # Cargar el checkpoint
-        checkpoint = torch.load(checkpoint_path, map_location=self.agent.device)
+        # Cargar los pesos del checkpoint
         self.agent.qnetwork_local.load_state_dict(checkpoint['local'])
         self.agent.qnetwork_target.load_state_dict(checkpoint['target'])
         self.agent.qnetwork_local.eval()
@@ -137,6 +146,7 @@ class RobotController:
     def get_state(self) -> np.ndarray:
         """
         Construye el estado actual del robot para el agente.
+        Adapta el estado según el tamaño requerido por el modelo.
         
         Returns:
             Estado normalizado para el agente
@@ -148,30 +158,31 @@ class RobotController:
         dist_left = distances.get('izquierda', 1000) / 2000.0
         dist_right = distances.get('derecha', 1000) / 2000.0
         
-        # Por ahora, usamos valores por defecto para posición y objetivo
-        # En una implementación completa, estos vendrían de sensores de localización
-        pos_x = 0.5
-        pos_y = 0.5
-        theta = 0.0
-        goal_x = 0.8
-        goal_y = 0.8
-        velocity = 0.0
+        # Construir estado base con los sensores
+        state_components = [dist_front, dist_left, dist_right]
         
-        # Construir el estado
-        state = np.array([
-            dist_front,
-            dist_left,
-            dist_right,
-            pos_x,
-            pos_y,
-            theta,
-            goal_x,
-            goal_y,
-            velocity,
-            0.0,  # Valores adicionales que el agente pueda necesitar
-            0.0,
-            0.0
-        ], dtype=np.float32)
+        # Agregar componentes adicionales según el tamaño del estado
+        if self.state_size > 3:
+            # Información adicional (posición, objetivo, velocidad, etc.)
+            # Por ahora usamos valores por defecto
+            additional_components = [
+                0.5,  # pos_x
+                0.5,  # pos_y
+                0.0,  # theta
+                0.8,  # goal_x
+                0.8,  # goal_y
+                0.0,  # velocity
+                0.0,  # extra_1
+                0.0,  # extra_2
+                0.0,  # extra_3
+            ]
+            
+            # Agregar solo los componentes necesarios
+            needed = self.state_size - 3
+            state_components.extend(additional_components[:needed])
+        
+        # Construir el estado como array numpy
+        state = np.array(state_components, dtype=np.float32)
         
         return state
     
