@@ -1,0 +1,167 @@
+REPORTE DEL PROYECTO: ROBOT AUTÓNOMO CON DEEP REINFORCEMENT LEARNING
+=================================================================
+
+1. DESCRIPCIÓN GENERAL
+---------------------
+El proyecto implementa un sistema de aprendizaje por refuerzo profundo para entrenar un robot autónomo en un entorno de simulación 2D. El objetivo principal es que el robot aprenda a navegar evitando obstáculos de manera eficiente y segura.
+
+2. COMPONENTES PRINCIPALES
+-------------------------
+
+2.1 Entorno de Simulación (crt_car_env/envs/car_env.py)
+------------------------------------------------------
+- Tipo: Entorno personalizado basado en Gymnasium
+- Dimensiones: 2D con vista superior
+- Tamaño del mapa: 800x800 píxeles
+- Visualización: Implementada con Pygame
+
+Características del Robot:
+- Modelo cinemático: Ackermann
+- Longitud: 40 píxeles
+- Velocidad máxima: 200 píxeles/segundo
+- Ángulo máximo de dirección: 45 grados
+
+Sensores:
+- 4 sensores de distancia
+- Rango máximo: 200 píxeles
+- Distribución: Frontal, Trasero, Izquierdo, Derecho
+- Ángulos: [0, π, π/6, -π/6]
+
+Obstáculos:
+- Tipo: Rectángulos
+- Cantidad: 15
+- Tamaño: Entre 30 y 75 píxeles
+- Distribución: Aleatoria con distancia mínima entre obstáculos
+
+2.2 Agente DQN (rl_algoritmos/agents/dqn_agent.py)
+-------------------------------------------------
+Arquitectura de la Red:
+- Tipo: Red neuronal feedforward
+- Capas: 3 (entrada -> oculta -> salida)
+- Tamaño capa oculta: 64 neuronas
+- Función de activación: ReLU
+
+Hiperparámetros:
+- Tamaño del buffer de experiencia: 100,000
+- Tamaño del batch: 64
+- Factor de descuento (gamma): 0.99
+- Factor de actualización suave (tau): 0.001
+- Tasa de aprendizaje: 0.0005
+- Frecuencia de actualización: Cada 4 pasos
+
+2.3 Sistema de Entrenamiento (rl_algoritmos/train_dqn.py)
+-------------------------------------------------------
+Características:
+- Entrenamiento episódico
+- Política epsilon-greedy con decaimiento
+- Sistema de checkpointing automático
+- Modo debug para monitoreo detallado
+- Visualización en tiempo real opcional
+
+Parámetros de Entrenamiento:
+- Episodios por defecto: 1000
+- Pasos máximos por episodio: 1000
+- Epsilon inicial: 1.0
+- Epsilon final: 0.01
+- Factor de decaimiento: 0.995
+
+3. SISTEMA DE RECOMPENSAS
+-------------------------
+
+3.1 Recompensas Positivas
+-------------------------
+a) Navegación Segura:
+   - Base: +2.0 por avanzar en zona segura
+   - Bonus: Hasta +2.0 adicionales por espacio libre a los lados
+
+b) Maniobras Evasivas:
+   - Base: +5.0 por giro correcto
+   - Bonus: Hasta +5.0 por diferencial de espacio
+   - Urgencia: Hasta +3.0 por proximidad al obstáculo
+
+c) Supervivencia:
+   - Recompensa logarítmica basada en tiempo de vida
+   - Factor base: 0.5
+   - Crecimiento más rápido al inicio
+
+3.2 Penalizaciones
+-----------------
+a) Proximidad a Obstáculos:
+   - Base: -5.0 * (factor de proximidad)^2
+   - Multiplicador por movimiento frontal: x3
+
+b) Colisiones:
+   - Base: -150.0 * exp(-3 * progreso)
+   - Extra por colisión frontal: x1.5
+
+c) Comportamiento Errático:
+   - Giros innecesarios: -2.0 * factor_seguridad
+   - Reversa innecesaria: -2.0
+
+4. SISTEMA DE CHECKPOINTING
+---------------------------
+Características:
+- Guardado periódico cada 250 episodios
+- Guardado en interrupciones (Ctrl+C)
+- Sistema de etiquetas para múltiples experimentos
+- Recuperación automática del último checkpoint
+
+Estructura de Checkpoints:
+- Pesos de la red local
+- Pesos de la red objetivo
+- Estado del optimizador
+- Configuración del modelo
+- Hiperparámetros
+
+5. RESULTADOS Y OBSERVACIONES
+----------------------------
+
+5.1 Comportamientos Aprendidos
+-----------------------------
+- Navegación básica en espacios abiertos
+- Evasión de obstáculos frontales
+- Recuperación de situaciones peligrosas
+- Mantenimiento de distancias seguras
+
+5.2 Desafíos Identificados
+-------------------------
+- Comportamiento suicida inicial
+- Oscilaciones en espacios estrechos
+- Optimización local en configuraciones complejas
+- Tiempo de convergencia variable
+
+5.3 Mejoras Implementadas
+------------------------
+- Sistema de recompensas adaptativo
+- Penalizaciones graduales
+- Checkpointing basado en rendimiento
+- Recuperación automática ante degradación
+
+6. REQUISITOS TÉCNICOS
+----------------------
+Dependencias principales:
+- Python 3.8+
+- PyTorch 2.9.0+
+- Gymnasium 1.2.1+
+- Pygame 2.6.1+
+- NumPy 2.3.4+
+
+Requisitos de hardware recomendados:
+- CPU: 2+ núcleos
+- RAM: 4GB mínimo
+- GPU: Opcional, compatible con CUDA
+
+7. CONCLUSIONES
+--------------
+El proyecto demuestra la viabilidad de usar Deep Reinforcement Learning para entrenar un robot autónomo en tareas de navegación básica. El sistema actual proporciona una base sólida para futuras mejoras y extensiones, como la implementación de tareas más complejas o la transferencia a robots reales.
+
+Los resultados muestran que el agente puede aprender comportamientos de navegación efectivos, aunque hay margen de mejora en términos de consistencia y eficiencia del aprendizaje. El sistema de recompensas adaptativo y el mecanismo de checkpointing han demostrado ser cruciales para manejar la naturaleza inestable del proceso de aprendizaje.
+
+8. TRABAJO FUTURO
+----------------
+- Implementación de memoria a corto plazo (LSTM)
+- Extensión a entornos dinámicos
+- Mejora del sistema de sensores
+- Optimización del tiempo de entrenamiento
+- Implementación de aprendizaje continuo
+- Transferencia a robots físicos
