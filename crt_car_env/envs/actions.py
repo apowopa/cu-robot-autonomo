@@ -19,36 +19,67 @@ class Action:
 
 
 class DiscreteActionSpace:
-    """Espacio de acciones discretas para el carro con tracción diferencial."""
+    """Espacio de acciones discretas para el carro con tracción diferencial.
+    
+    Cada rueda puede estar en 3 estados:
+    - ADELANTE: velocidad = +1.0 (encendida hacia adelante)
+    - APAGADA: velocidad = 0.0 (motor apagado)
+    - ATRÁS: velocidad = -1.0 (encendida hacia atrás)
+    
+    Esto da 9 combinaciones posibles (3 estados x 3 estados).
+    """
 
     def __init__(self):
         """Inicializa el espacio de acciones con valores predefinidos.
         
         En el modelo de tracción diferencial:
-        - speed: velocidad de la rueda izquierda (-1 a 1)
-        - steering: velocidad de la rueda derecha (-1 a 1)
+        - speed: estado de la rueda izquierda (-1.0, 0.0, o 1.0)
+        - steering: estado de la rueda derecha (-1.0, 0.0, o 1.0)
         """
-        # Definir las acciones básicas
+        # Definir las 9 acciones posibles (combinaciones de estados de las ruedas)
         self.basic_actions = [
-            Action(speed=0.8, steering=0.8, action_idx=0),    # ADELANTE (ambas ruedas igual velocidad)
-            Action(speed=-0.5, steering=-0.5, action_idx=1),  # REVERSA (ambas ruedas hacia atrás)
-            Action(speed=0.3, steering=0.8, action_idx=2),    # GIRO IZQUIERDA (rueda izq lenta, der rápida)
-            Action(speed=0.8, steering=0.3, action_idx=3),    # GIRO DERECHA (rueda izq rápida, der lenta)
-            Action(speed=-0.3, steering=0.8, action_idx=4),   # GIRO CERRADO IZQUIERDA (rueda izq reversa, der adelante)
-            Action(speed=0.8, steering=-0.3, action_idx=5),   # GIRO CERRADO DERECHA (rueda izq adelante, der reversa)
+            # Rueda Izq: ADELANTE (+1), Rueda Der: ADELANTE (+1)
+            Action(speed=1.0, steering=1.0, action_idx=0),
+            
+            # Rueda Izq: ADELANTE (+1), Rueda Der: APAGADA (0)
+            Action(speed=1.0, steering=0.0, action_idx=1),
+            
+            # Rueda Izq: ADELANTE (+1), Rueda Der: ATRÁS (-1)
+            Action(speed=1.0, steering=-1.0, action_idx=2),
+            
+            # Rueda Izq: APAGADA (0), Rueda Der: ADELANTE (+1)
+            Action(speed=0.0, steering=1.0, action_idx=3),
+            
+            # Rueda Izq: APAGADA (0), Rueda Der: APAGADA (0)
+            Action(speed=0.0, steering=0.0, action_idx=4),
+            
+            # Rueda Izq: APAGADA (0), Rueda Der: ATRÁS (-1)
+            Action(speed=0.0, steering=-1.0, action_idx=5),
+            
+            # Rueda Izq: ATRÁS (-1), Rueda Der: ADELANTE (+1)
+            Action(speed=-1.0, steering=1.0, action_idx=6),
+            
+            # Rueda Izq: ATRÁS (-1), Rueda Der: APAGADA (0)
+            Action(speed=-1.0, steering=0.0, action_idx=7),
+            
+            # Rueda Izq: ATRÁS (-1), Rueda Der: ATRÁS (-1)
+            Action(speed=-1.0, steering=-1.0, action_idx=8),
         ]
 
         self.n = len(self.basic_actions)
         self.all_actions = self.basic_actions
 
-        # Mapeo de acciones para descripciones
+        # Mapeo de acciones para descripciones legibles
         self.action_descriptions = {
-            0: "ADELANTE",
-            1: "REVERSA",
-            2: "GIRO_IZQUIERDA",
-            3: "GIRO_DERECHA",
-            4: "GIRO_CERRADO_IZQUIERDA",
-            5: "GIRO_CERRADO_DERECHA",
+            0: "ADELANTE (IZQ:+, DER:+)",
+            1: "GIRO_DERECHA_SUAVE (IZQ:+, DER:0)",
+            2: "GIRO_DERECHA_CERRADO (IZQ:+, DER:-)",
+            3: "GIRO_IZQUIERDA_SUAVE (IZQ:0, DER:+)",
+            4: "DETENIDO (IZQ:0, DER:0)",
+            5: "GIRO_IZQUIERDA_REVERSA (IZQ:0, DER:-)",
+            6: "GIRO_IZQUIERDA_CERRADO (IZQ:-, DER:+)",
+            7: "GIRO_DERECHA_REVERSA (IZQ:-, DER:0)",
+            8: "REVERSA (IZQ:-, DER:-)",
         }
  
     def sample(self) -> Action:

@@ -5,23 +5,31 @@ import pygame
 from math import sin, cos, pi
 from .actions import DiscreteActionSpace
 
-# Parámetros de la Simulación
-MAP_SIZE = 800.0  # Tamaño del mapa en píxeles
-CAR_LENGTH = 40.0  # Longitud del coche
-WHEEL_BASE = 40.0  # Distancia entre las ruedas traseras (ancho del robot)
-MAX_WHEEL_SPEED = 200.0  # Velocidad máxima de cada rueda en píxeles por segundo
-SENSOR_RANGE = 200.0  # Rango máximo de los sensores
+# Parámetros de la Simulación (en centímetros)
+MAP_WIDTH = 200.0  # Ancho del mapa en cm 
+MAP_HEIGHT = 350.0  # Alto del mapa en cm 
+CAR_LENGTH = 15.0  # Longitud del coche en cm
+WHEEL_BASE = 12.0  # Distancia entre las ruedas traseras (ancho del robot) en cm
+MAX_WHEEL_SPEED = 50.0  # Velocidad máxima de cada rueda en cm/s
+SENSOR_RANGE = 80.0  # Rango máximo de los sensores en cm
+
+# Parámetros de física (inercia y fricción)
+ACCELERATION = 150.0  # Aceleración máxima en cm/s² (cambio de velocidad)
+FRICTION_COEFFICIENT = 0.15  # Coeficiente de fricción (0-1, mayor = más fricción)
+
+# Parámetros de visualización
+PIXELS_PER_CM = 3.0  # Factor de escala para el renderizado (2 píxeles por cm)
 
 # Distancias críticas para los sensores (en función del largo del carro)
-DANGER_DISTANCE = CAR_LENGTH * 3.0  # Zona de peligro inmediato
-OPTIMAL_DISTANCE = CAR_LENGTH * 4.5  # Distancia óptima para seguir paredes
-GUARDING_DISTANCE = SENSOR_RANGE  # Distancia de monitoreo
+DANGER_DISTANCE = CAR_LENGTH * 3.0  # Zona de peligro inmediato (45 cm)
+OPTIMAL_DISTANCE = CAR_LENGTH * 4.5  # Distancia óptima para seguir paredes (67.5 cm)
+GUARDING_DISTANCE = SENSOR_RANGE  # Distancia de monitoreo (80 cm)
 
-# Parámetros de los obstáculos
-NUM_RECTANGLES = 25  # Número de obstáculos rectangulares
-MIN_OBSTACLE_SIZE = 20.0  # Tamaño mínimo de los obstáculos
-MAX_OBSTACLE_SIZE = 75.0  # Tamaño máximo de los obstáculos
-MIN_DISTANCE_BETWEEN_OBSTACLE = CAR_LENGTH * 2
+# Parámetros de los obstáculos (en cm)
+NUM_RECTANGLES = 15  # Número de obstáculos rectangulares (reducido para espacio rectangular)
+MIN_OBSTACLE_SIZE = 8.0  # Tamaño mínimo de los obstáculos en cm
+MAX_OBSTACLE_SIZE = 25.0  # Tamaño máximo de los obstáculos en cm
+MIN_DISTANCE_BETWEEN_OBSTACLE = CAR_LENGTH * 2  # Distancia mínima entre obstáculos (30 cm)
 
 
 class CRTCarEnv(gym.Env):
@@ -29,9 +37,25 @@ class CRTCarEnv(gym.Env):
     Entorno de simulación 2D para un robot con tracción diferencial
     (dos ruedas motrices traseras y una rueda loca frontal)
     y 4 sensores de distancia, compatible con Gymnasium.
+    
+    Todas las distancias están en centímetros (cm).
     """
 
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 30}
+    
+    # Constantes de clase (para acceso externo)
+    MAP_WIDTH = MAP_WIDTH
+    MAP_HEIGHT = MAP_HEIGHT
+    CAR_LENGTH = CAR_LENGTH
+    WHEEL_BASE = WHEEL_BASE
+    MAX_WHEEL_SPEED = MAX_WHEEL_SPEED
+    SENSOR_RANGE = SENSOR_RANGE
+    PIXELS_PER_CM = PIXELS_PER_CM
+    DANGER_DISTANCE = DANGER_DISTANCE
+    OPTIMAL_DISTANCE = OPTIMAL_DISTANCE
+    NUM_RECTANGLES = NUM_RECTANGLES
+    MIN_OBSTACLE_SIZE = MIN_OBSTACLE_SIZE
+    MAX_OBSTACLE_SIZE = MAX_OBSTACLE_SIZE
 
     def __init__(self, render_mode=None):
         super().__init__()
@@ -63,10 +87,12 @@ class CRTCarEnv(gym.Env):
 
         # Estado interno del coche
         self.state = {
-            "x": 0.0,  # Posición X
-            "y": 0.0,  # Posición Y
+            "x": 0.0,  # Posición X (cm)
+            "y": 0.0,  # Posición Y (cm)
             "theta": 0.0,  # Orientación (radianes)
-            "speed": 0.0,  # Velocidad lineal actual
+            "speed": 0.0,  # Velocidad lineal actual (cm/s)
+            "v_left": 0.0,  # Velocidad actual rueda izquierda (cm/s)
+            "v_right": 0.0,  # Velocidad actual rueda derecha (cm/s)
         }
 
         # Variables de renderizado
@@ -101,9 +127,9 @@ class CRTCarEnv(gym.Env):
                 # Verificar colisión con paredes
                 if (
                     current_pos[0] < 0
-                    or current_pos[0] >= MAP_SIZE
+                    or current_pos[0] >= MAP_WIDTH
                     or current_pos[1] < 0
-                    or current_pos[1] >= MAP_SIZE
+                    or current_pos[1] >= MAP_HEIGHT
                 ):
                     readings[i] = np.linalg.norm(
                         current_pos - np.array([self.state["x"], self.state["y"]])
@@ -135,26 +161,60 @@ class CRTCarEnv(gym.Env):
 
     def _calculate_kinematics(self, action, dt):
         """
-        Aplica el modelo cinemático de tracción diferencial para actualizar la posición.
+        Aplica el modelo cinemático de tracción diferencial con inercia.
         
-        En este modelo, el robot tiene dos ruedas motrices traseras independientes
-        y una rueda loca frontal que sigue la dirección del movimiento.
+        El robot tiene dos ruedas motrices traseras independientes y una rueda loca frontal.
+        Las velocidades de las ruedas cambian gradualmente (aceleración/desaceleración)
+        en lugar de instantáneamente, simulando la inercia del sistema.
 
         Args:
-            action (np.ndarray): [Velocidad rueda izquierda (-1 a 1), Velocidad rueda derecha (-1 a 1)]
+            action (np.ndarray): [Velocidad objetivo rueda izquierda (-1 a 1), 
+                                  Velocidad objetivo rueda derecha (-1 a 1)]
             dt (float): Paso de tiempo en segundos.
         """
         left_wheel_input, right_wheel_input = action
 
-        # Mapear entradas a velocidades físicas
-        v_left = left_wheel_input * MAX_WHEEL_SPEED
-        v_right = right_wheel_input * MAX_WHEEL_SPEED
+        # Velocidades objetivo (deseadas) para cada rueda
+        v_left_target = left_wheel_input * MAX_WHEEL_SPEED
+        v_right_target = right_wheel_input * MAX_WHEEL_SPEED
+
+        # Aplicar aceleración gradual con inercia
+        # La velocidad cambia hacia el objetivo, limitada por la aceleración máxima
+        
+        # Calcular la diferencia entre velocidad actual y objetivo
+        delta_v_left = v_left_target - self.state["v_left"]
+        delta_v_right = v_right_target - self.state["v_right"]
+        
+        # Limitar el cambio de velocidad según la aceleración máxima
+        max_delta_v = ACCELERATION * dt
+        
+        # Aplicar aceleración limitada
+        if abs(delta_v_left) > max_delta_v:
+            delta_v_left = max_delta_v * np.sign(delta_v_left)
+        if abs(delta_v_right) > max_delta_v:
+            delta_v_right = max_delta_v * np.sign(delta_v_right)
+        
+        # Actualizar velocidades actuales
+        self.state["v_left"] += delta_v_left
+        self.state["v_right"] += delta_v_right
+        
+        # Aplicar fricción (desaceleración cuando no hay input)
+        # La fricción reduce la velocidad proporcionalmente
+        friction_factor = 1.0 - FRICTION_COEFFICIENT * dt
+        if abs(left_wheel_input) < 0.01:  # Si no hay input significativo
+            self.state["v_left"] *= friction_factor
+        if abs(right_wheel_input) < 0.01:
+            self.state["v_right"] *= friction_factor
+        
+        # Limitar velocidades al máximo permitido
+        self.state["v_left"] = np.clip(self.state["v_left"], -MAX_WHEEL_SPEED, MAX_WHEEL_SPEED)
+        self.state["v_right"] = np.clip(self.state["v_right"], -MAX_WHEEL_SPEED, MAX_WHEEL_SPEED)
 
         # Calcular velocidad lineal del centro del robot (promedio de las ruedas)
-        v = (v_left + v_right) / 2.0
+        v = (self.state["v_left"] + self.state["v_right"]) / 2.0
         
         # Calcular velocidad angular (diferencia de velocidades / distancia entre ruedas)
-        omega = (v_right - v_left) / WHEEL_BASE
+        omega = (self.state["v_right"] - self.state["v_left"]) / WHEEL_BASE
 
         # Actualizar orientación
         self.state["theta"] += omega * dt
@@ -381,7 +441,7 @@ class CRTCarEnv(gym.Env):
             terminated = True
 
         # Terminar si sale del mapa
-        if not (0 <= self.state["x"] <= MAP_SIZE and 0 <= self.state["y"] <= MAP_SIZE):
+        if not (0 <= self.state["x"] <= MAP_WIDTH and 0 <= self.state["y"] <= MAP_HEIGHT):
             # Penalización similar a la colisión pero ligeramente menor
             progress = self.step_count / self.max_steps
             base_penalty = 120.0  # Menor que la penalización por colisión
@@ -419,8 +479,8 @@ class CRTCarEnv(gym.Env):
             for attempt in range(max_attempts):
                 width = self.np_random.uniform(MIN_OBSTACLE_SIZE, MAX_OBSTACLE_SIZE)
                 height = self.np_random.uniform(MIN_OBSTACLE_SIZE, MAX_OBSTACLE_SIZE)
-                x = self.np_random.uniform(margin, MAP_SIZE - width)
-                y = self.np_random.uniform(margin, MAP_SIZE - height)
+                x = self.np_random.uniform(margin, MAP_WIDTH - width - margin)
+                y = self.np_random.uniform(margin, MAP_HEIGHT - height - margin)
 
                 # Verificar distancia con otros obstáculos
                 valid_position = True
@@ -474,7 +534,7 @@ class CRTCarEnv(gym.Env):
         Verifica si una posición es válida (sin colisiones y dentro del mapa).
         """
         x, y = position
-        if not (0 <= x <= MAP_SIZE and 0 <= y <= MAP_SIZE):
+        if not (0 <= x <= MAP_WIDTH and 0 <= y <= MAP_HEIGHT):
             return False
 
         # Verificar colisión con obstáculos
@@ -513,8 +573,8 @@ class CRTCarEnv(gym.Env):
         max_attempts = 100
 
         for _ in range(max_attempts):
-            x = self.np_random.uniform(margin, MAP_SIZE - margin)
-            y = self.np_random.uniform(margin, MAP_SIZE - margin)
+            x = self.np_random.uniform(margin, MAP_WIDTH - margin)
+            y = self.np_random.uniform(margin, MAP_HEIGHT - margin)
 
             # Verificar si la posición es válida
             if self._is_valid_position(np.array([x, y])):
@@ -522,15 +582,19 @@ class CRTCarEnv(gym.Env):
                 self.state["y"] = y
                 self.state["theta"] = self.np_random.uniform(-pi, pi)
                 self.state["speed"] = 0.0
+                self.state["v_left"] = 0.0
+                self.state["v_right"] = 0.0
                 break
         else:
             # Si no se encuentra una posición válida, usar el centro del mapa
             if self.render_mode == "human":
                 print("Advertencia: No se encontró una posición inicial válida")
-            self.state["x"] = MAP_SIZE / 2
-            self.state["y"] = MAP_SIZE / 2
+            self.state["x"] = MAP_WIDTH / 2
+            self.state["y"] = MAP_HEIGHT / 2
             self.state["theta"] = 0.0
             self.state["speed"] = 0.0
+            self.state["v_left"] = 0.0
+            self.state["v_right"] = 0.0
 
         observation = self._get_obs()
         info = self._get_info()
@@ -554,15 +618,24 @@ class CRTCarEnv(gym.Env):
             return self._render_frame()
 
     def _render_frame(self):
+        # Calcular dimensiones de la ventana en píxeles
+        window_width = int(MAP_WIDTH * PIXELS_PER_CM)
+        window_height = int(MAP_HEIGHT * PIXELS_PER_CM)
+        
         if self.window is None and self.render_mode == "human":
             pygame.init()
             pygame.display.init()
-            self.window = pygame.display.set_mode((int(MAP_SIZE), int(MAP_SIZE)))
+            self.window = pygame.display.set_mode((window_width, window_height))
+            pygame.display.set_caption(f"Robot Simulator - {MAP_WIDTH:.0f}x{MAP_HEIGHT:.0f} cm")
         if self.clock is None and self.render_mode == "human":
             self.clock = pygame.time.Clock()
 
-        canvas = pygame.Surface((int(MAP_SIZE), int(MAP_SIZE)))
+        canvas = pygame.Surface((window_width, window_height))
         canvas.fill((255, 255, 255))  # Fondo blanco
+        
+        # Función auxiliar para convertir coordenadas de cm a píxeles
+        def cm_to_pixels(value):
+            return int(value * PIXELS_PER_CM)
 
         # Dibujar obstáculos
         # Rectángulos
@@ -570,7 +643,12 @@ class CRTCarEnv(gym.Env):
             pygame.draw.rect(
                 canvas,
                 (128, 128, 128),  # Gris
-                pygame.Rect(int(x), int(y), int(width), int(height)),
+                pygame.Rect(
+                    cm_to_pixels(x),
+                    cm_to_pixels(y),
+                    cm_to_pixels(width),
+                    cm_to_pixels(height)
+                ),
             )
 
         # Círculos
@@ -578,19 +656,19 @@ class CRTCarEnv(gym.Env):
             pygame.draw.circle(
                 canvas,
                 (100, 100, 100),  # Gris oscuro
-                (int(x), int(y)),
-                int(radius),
+                (cm_to_pixels(x), cm_to_pixels(y)),
+                cm_to_pixels(radius),
             )
 
         # Dibujar el robot con tracción diferencial
-        car_pos = (int(self.state["x"]), int(self.state["y"]))
+        car_pos = (cm_to_pixels(self.state["x"]), cm_to_pixels(self.state["y"]))
 
-        # Dimensiones del robot
-        body_width = WHEEL_BASE * 0.8  # Ancho del cuerpo (un poco menos que la distancia entre ruedas)
-        body_length = CAR_LENGTH  # Largo del cuerpo
-        wheel_width = WHEEL_BASE * 0.15  # Ancho de las ruedas
-        wheel_length = CAR_LENGTH * 0.25  # Largo de las ruedas
-        caster_radius = WHEEL_BASE * 0.12  # Radio de la rueda loca
+        # Dimensiones del robot (en píxeles para el renderizado)
+        body_width = cm_to_pixels(WHEEL_BASE * 0.8)  # Ancho del cuerpo
+        body_length = cm_to_pixels(CAR_LENGTH)  # Largo del cuerpo
+        wheel_width = cm_to_pixels(WHEEL_BASE * 0.15)  # Ancho de las ruedas
+        wheel_length = cm_to_pixels(CAR_LENGTH * 0.25)  # Largo de las ruedas
+        caster_radius = cm_to_pixels(WHEEL_BASE * 0.12)  # Radio de la rueda loca
 
         # Puntos del cuerpo principal (rectangular)
         body_points = [
@@ -612,8 +690,8 @@ class CRTCarEnv(gym.Env):
 
         # Dibujar las dos ruedas motrices traseras
         rear_wheel_positions = [
-            (-body_length / 3, -WHEEL_BASE / 2),  # Rueda trasera izquierda
-            (-body_length / 3, WHEEL_BASE / 2),   # Rueda trasera derecha
+            (-body_length / 3, -cm_to_pixels(WHEEL_BASE) / 2),  # Rueda trasera izquierda
+            (-body_length / 3, cm_to_pixels(WHEEL_BASE) / 2),   # Rueda trasera derecha
         ]
 
         for wx, wy in rear_wheel_positions:
@@ -676,13 +754,13 @@ class CRTCarEnv(gym.Env):
         for reading, angle in zip(sensor_readings, sensor_angles):
             abs_angle = self.state["theta"] + angle
 
-            # Punto donde termina la zona roja (umbral de guardia)
-            guard_x = car_pos[0] + cos(abs_angle) * DANGER_DISTANCE
-            guard_y = car_pos[1] + sin(abs_angle) * DANGER_DISTANCE
+            # Punto donde termina la zona roja (umbral de guardia) - convertir a píxeles
+            guard_x = car_pos[0] + cos(abs_angle) * cm_to_pixels(DANGER_DISTANCE)
+            guard_y = car_pos[1] + sin(abs_angle) * cm_to_pixels(DANGER_DISTANCE)
 
-            # Punto final del sensor (donde detecta algo)
-            end_x = car_pos[0] + cos(abs_angle) * reading
-            end_y = car_pos[1] + sin(abs_angle) * reading
+            # Punto final del sensor (donde detecta algo) - convertir a píxeles
+            end_x = car_pos[0] + cos(abs_angle) * cm_to_pixels(reading)
+            end_y = car_pos[1] + sin(abs_angle) * cm_to_pixels(reading)
 
             # Dibujar parte roja (desde el carro hasta el umbral)
             pygame.draw.line(
