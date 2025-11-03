@@ -157,9 +157,16 @@ class DQNAgent:
 
     def load(self, filename):
         checkpoint = torch.load(filename)
-        self.qnetwork_local.load_state_dict(checkpoint["qnetwork_local_state_dict"])
-        self.qnetwork_target.load_state_dict(checkpoint["qnetwork_target_state_dict"])
-        self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        # Intentar cargar con las claves nuevas primero, luego las antiguas
+        if "local" in checkpoint:
+            self.qnetwork_local.load_state_dict(checkpoint["local"])
+            self.qnetwork_target.load_state_dict(checkpoint["target"])
+            self.optimizer.load_state_dict(checkpoint["optimizer"])
+        else:
+            # Formato antiguo para compatibilidad
+            self.qnetwork_local.load_state_dict(checkpoint["qnetwork_local_state_dict"])
+            self.qnetwork_target.load_state_dict(checkpoint["qnetwork_target_state_dict"])
+            self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
 
     def get_model_state(self):
         return {
