@@ -21,8 +21,8 @@ FRICTION_COEFFICIENT = 0.15  # Coeficiente de fricción (0-1, mayor = más fricc
 PIXELS_PER_CM = 3.0  # Factor de escala para el renderizado (2 píxeles por cm)
 
 # Distancias críticas para los sensores (en función del largo del carro)
-DANGER_DISTANCE = CAR_LENGTH * 3.0  # Zona de peligro inmediato (45 cm)
-OPTIMAL_DISTANCE = CAR_LENGTH * 4.5  # Distancia óptima para seguir paredes (67.5 cm)
+DANGER_DISTANCE = CAR_LENGTH * 1.5  
+OPTIMAL_DISTANCE = CAR_LENGTH * 2.0  
 GUARDING_DISTANCE = SENSOR_RANGE  # Distancia de monitoreo (80 cm)
 
 # Parámetros de los obstáculos (en cm)
@@ -246,6 +246,12 @@ class CRTCarEnv(gym.Env):
 
         # Calcular recompensa
         reward = 0.0
+        
+        # Guardar estado anterior para calcular progreso
+        if not hasattr(self, 'prev_pos'):
+            self.prev_pos = np.array([self.state["x"], self.state["y"]])
+        
+        current_pos = np.array([self.state["x"], self.state["y"]])
 
         # Para debugging
         if self.render_mode == "human":
@@ -254,165 +260,88 @@ class CRTCarEnv(gym.Env):
             )
 
         # Obtener lecturas de sensores
-        sensor_frontal = observation[1]  # Lectura del sensor frontal
-        sensor_izq = observation[3]  # Lectura del sensor izquierdo
-        sensor_der = observation[4]  # Lectura del sensor derecho
+        sensor_frontal = observation[1]
+        sensor_trasero = observation[2]  # No se usa en recompensas
+        sensor_izq = observation[3]
+        sensor_der = observation[4]
+        
+        # Solo usar sensores relevantes (frontal, izquierdo, derecho)
+        # El sensor trasero no es útil para el robot real
         min_sensor = np.min([sensor_frontal, sensor_izq, sensor_der])
 
-        # 1. Recompensas base por acción
+        # ============================================================
+        # SISTEMA DE RECOMPENSAS
+        # ============================================================
+        
+        # 1. RECOMPENSA POR MOVIMIENTO (incentivar avance constante)
+        distance_traveled = np.linalg.norm(current_pos - self.prev_pos)
+        movement_reward = distance_traveled * 0.5  # Recompensa proporcional a distancia recorrida
+        reward += movement_reward
+        
+        # 2. RECOMPENSA POR VELOCIDAD CONSTANTE (evitar detenerse)
+        speed_reward = abs(self.state["speed"]) * 0.1  # Recompensa por mantener velocidad
+        reward += speed_reward
+        
+        # 3. PENALIZACIÓN POR ACCIÓN "DETENIDO" (debe seguir moviéndose)
         action_desc = self.discrete_actions.describe_action(discrete_action)
-
-        # Penalización gradual por proximidad frontal
-        if sensor_frontal < OPTIMAL_DISTANCE:
-            # Calcular qué tan cerca está del obstáculo
-            proximity_factor = (OPTIMAL_DISTANCE - sensor_frontal) / (
-                OPTIMAL_DISTANCE - DANGER_DISTANCE
-            )
-            proximity_factor = np.clip(
-                proximity_factor, 0, 1
-            )  # Asegurar que esté entre 0 y 1
-
-            # Penalización exponencial por proximidad
-            base_penalty = -5.0
-            proximity_penalty = base_penalty * (
-                proximity_factor**2
-            )  # Penalización cuadrática
-
-            # Detectar comportamiento suicida (acercamiento frontal)
-            is_frontal_approach = (
-                sensor_frontal < OPTIMAL_DISTANCE
-                and sensor_izq > OPTIMAL_DISTANCE
-                and sensor_der > OPTIMAL_DISTANCE
-            )
-
-            # Detectar si se está moviendo hacia el obstáculo
-            if action_desc == "ADELANTE" and is_frontal_approach:
-                proximity_penalty *= 3.0  # Triple penalización por avanzar directamente hacia un obstáculo
-                if self.render_mode == "human":
-                    print("\n¡Alerta! Comportamiento suicida detectado")
-
-            reward += proximity_penalty
-
-        # Recompensas por acciones
-        if action_desc == "ADELANTE":
-            # Zona segura
-            if sensor_frontal > OPTIMAL_DISTANCE:
-                safe_space = min(sensor_izq, sensor_der) / SENSOR_RANGE
-                base_reward = 2.0
-                space_bonus = safe_space * 2.0  # Bonus por espacio libre a los lados
-                reward += base_reward + space_bonus
-            else:
-                # Penalización progresiva por avanzar hacia el peligro
-                danger_factor = (OPTIMAL_DISTANCE - sensor_frontal) / OPTIMAL_DISTANCE
-                penalty = -15.0 * danger_factor  # Penalización más severa
-                reward += penalty
-
-        elif action_desc == "REVERSA":
-            if sensor_frontal < OPTIMAL_DISTANCE:
-                # Recompensa por alejarse del peligro
-                danger_factor = (OPTIMAL_DISTANCE - sensor_frontal) / OPTIMAL_DISTANCE
-                reversa_reward = 4.0 * danger_factor
-
-                # Bonus extra por evitar colisión inminente
-                if sensor_frontal < DANGER_DISTANCE:
-                    reversa_reward *= 1.5
-
-                reward += reversa_reward
-            else:
-                # Penalización moderada por reversa innecesaria
-                # Menor penalización si hay obstáculos cercanos a los lados
-                if min(sensor_izq, sensor_der) < OPTIMAL_DISTANCE:
-                    reward -= 1.0
-                else:
-                    reward -= 2.0
-
-        elif action_desc in ["GIRO_IZQUIERDA", "GIRO_DERECHA", "GIRO_CERRADO_IZQUIERDA", "GIRO_CERRADO_DERECHA"]:
-            # Detectar si es necesario girar
-            need_to_turn = sensor_frontal < OPTIMAL_DISTANCE * 1.5
-            
-            # Determinar si es un giro cerrado (más agresivo)
-            is_tight_turn = action_desc in ["GIRO_CERRADO_IZQUIERDA", "GIRO_CERRADO_DERECHA"]
-
-            if need_to_turn:
-                # Determinar la dirección óptima de giro
-                space_left = sensor_izq
-                space_right = sensor_der
-                turning_left = action_desc in ["GIRO_IZQUIERDA", "GIRO_CERRADO_IZQUIERDA"]
-
-                # Calcular el diferencial de espacio normalizado
-                space_diff = abs(space_left - space_right) / SENSOR_RANGE
-                
-                # Calcular urgencia del giro
-                urgency = (OPTIMAL_DISTANCE * 1.5 - sensor_frontal) / (OPTIMAL_DISTANCE * 1.5)
-
-                if turning_left:
-                    if space_left > space_right:
-                        # Giro correcto hacia el espacio más amplio
-                        base_reward = 5.0
-                        space_bonus = space_diff * 5.0
-                        urgency_bonus = urgency * 3.0
-                        
-                        # Bonus adicional por giro cerrado cuando es muy urgente
-                        if is_tight_turn and sensor_frontal < DANGER_DISTANCE * 1.5:
-                            urgency_bonus *= 1.5
-                        
-                        reward += base_reward + space_bonus + urgency_bonus
-                    else:
-                        # Giro hacia el espacio más reducido
-                        penalty_factor = space_diff + 0.5
-                        # Penalización más severa para giros cerrados en dirección incorrecta
-                        if is_tight_turn:
-                            penalty_factor *= 1.5
-                        reward -= 4.0 * penalty_factor
-                else:  # Girando a la derecha
-                    if space_right > space_left:
-                        # Giro correcto hacia el espacio más amplio
-                        base_reward = 5.0
-                        space_bonus = space_diff * 5.0
-                        urgency_bonus = urgency * 3.0
-                        
-                        # Bonus adicional por giro cerrado cuando es muy urgente
-                        if is_tight_turn and sensor_frontal < DANGER_DISTANCE * 1.5:
-                            urgency_bonus *= 1.5
-                        
-                        reward += base_reward + space_bonus + urgency_bonus
-                    else:
-                        # Giro hacia el espacio más reducido
-                        penalty_factor = space_diff + 0.5
-                        # Penalización más severa para giros cerrados en dirección incorrecta
-                        if is_tight_turn:
-                            penalty_factor *= 1.5
-                        reward -= 4.0 * penalty_factor
-            else:
-                # Giro innecesario - penalización variable según la proximidad de obstáculos
-                closest_obstacle = min(sensor_frontal, sensor_izq, sensor_der)
-                safety_factor = closest_obstacle / OPTIMAL_DISTANCE
-                safety_factor = np.clip(safety_factor, 0, 1)
-
-                # Penalización más suave si hay obstáculos cercanos
-                # Penalización más severa para giros cerrados innecesarios
-                penalty = -2.0 * safety_factor
-                if is_tight_turn:
-                    penalty *= 1.3
-                reward += penalty
-
-        # Penalizaciones por situaciones extremadamente peligrosas
+        if action_desc == "DETENIDO":
+            reward -= 2.0
+        
+        # 4. INCENTIVO POR MOVIMIENTO HACIA ADELANTE / PENALIZACIÓN POR REVERSA
+        if discrete_action == 0:
+            # ADELANTE puro (ambas ruedas +): bonus extra
+            reward += 1.5
+        elif discrete_action in [1, 3]:
+            # Giros suaves con adelante: bonus moderado
+            reward += 0.5
+        elif discrete_action in [5, 6, 7]:
+            # Acciones con alguna rueda en reversa: penalización
+            reward -= 3.0
+        elif discrete_action == 8:
+            # REVERSA completa (ambas ruedas -): penalización muy fuerte
+            reward -= 5.0
+        
+        # 5. RECOMPENSA POR MANTENER DISTANCIA SEGURA (evitar obstáculos)
+        # Solo usar sensores frontal, izquierdo y derecho (el trasero no es útil)
+        front_safety = sensor_frontal / SENSOR_RANGE
+        left_safety = sensor_izq / SENSOR_RANGE
+        right_safety = sensor_der / SENSOR_RANGE
+        
+        # Recompensa por espacio libre (solo sensores relevantes)
+        avg_clearance = (front_safety + left_safety + right_safety) / 3.0
+        clearance_reward = avg_clearance * 1.0
+        reward += clearance_reward
+        
+        # 5. PENALIZACIÓN POR PROXIMIDAD PELIGROSA
         if min_sensor < DANGER_DISTANCE:
-            # Penalización exponencial por proximidad al peligro
-            danger_factor = (DANGER_DISTANCE - min_sensor) / DANGER_DISTANCE
-            danger_penalty = -5.0 * (danger_factor**2)  # Penalización cuadrática
+            danger_ratio = min_sensor / DANGER_DISTANCE
+            danger_penalty = -5.0 * (1.0 - danger_ratio) ** 2  # Penalización cuadrática
             reward += danger_penalty
-
+        
+        # 6. RECOMPENSA POR EXPLORACIÓN (incentivar cubrir área)
+        # Pequeña recompensa por cada paso sin colisión
+        exploration_reward = 0.3
+        reward += exploration_reward
+        
+        # 7. PENALIZACIÓN POR USO EXCESIVO DE GIROS CERRADOS
+        # (incentivar movimiento suave)
+        if "CERRADO" in action_desc:
+            reward -= 0.5
+        
+        # 8. BONUS POR MOVIMIENTO FLUIDO
+        # Recompensa si la velocidad es similar al paso anterior
+        if hasattr(self, 'prev_speed'):
+            speed_change = abs(self.state["speed"] - self.prev_speed)
+            if speed_change < 5.0:  # Cambio suave de velocidad
+                fluidity_bonus = 0.3
+                reward += fluidity_bonus
+        
+        # Actualizar estado anterior
+        self.prev_pos = current_pos
+        self.prev_speed = self.state["speed"]
+        
         # Incrementar el contador de pasos
         self.step_count += 1
-
-        # Recompensa por supervivencia (curva logarítmica)
-        # La recompensa crece más rápido al principio y se estabiliza con el tiempo
-        normalized_time = self.step_count / self.max_steps
-        survival_reward = 0.5 * np.log(
-            1 + 10 * normalized_time
-        )  # Base 0.5, factor 10 para ajustar la curva
-        reward += survival_reward
 
         # Verificar terminación
         terminated = False
@@ -595,6 +524,10 @@ class CRTCarEnv(gym.Env):
             self.state["speed"] = 0.0
             self.state["v_left"] = 0.0
             self.state["v_right"] = 0.0
+
+        # Inicializar variables para el sistema de recompensas
+        self.prev_pos = np.array([self.state["x"], self.state["y"]])
+        self.prev_speed = 0.0
 
         observation = self._get_obs()
         info = self._get_info()
