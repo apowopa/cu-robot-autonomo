@@ -254,9 +254,9 @@ class RobotController:
                 step_counter += 1
                 if step_counter % 5 == 0:  # Mostrar cada 5 pasos
                     distances = self.cached_distances
-                    print(f"Step {step_counter}: F={distances.get('frontal', 0):4d}mm | "
-                          f"I={distances.get('izquierda', 0):4d}mm | "
-                          f"D={distances.get('derecha', 0):4d}mm")
+                    print(f"Step {step_counter}: F={distances.get('frontal', 0):6.1f}cm | "
+                          f"I={distances.get('izquierda', 0):6.1f}cm | "
+                          f"D={distances.get('derecha', 0):6.1f}cm")
                 
                 # Reducir sleep para mejores tiempos de reacción
                 time.sleep(0.05)  # 50ms = 20 Hz (era 0.2 = 5 Hz)
