@@ -102,95 +102,74 @@ class RobotController:
         """Carga el agente DQN desde un checkpoint."""
         print(f"Cargando agente desde {checkpoint_path}...")
         
-        # Cargar el checkpoint primero para detectar las dimensiones
-        checkpoint = torch.load(checkpoint_path, map_location='cpu')
-        
-        # Detectar el tamaño del estado desde el checkpoint
-        # La primera capa (fc1.weight) tiene forma [hidden_size, state_size]
-        state_size = checkpoint['local']['fc1.weight'].shape[1]
+        # El estado siempre tiene 5 elementos: [theta, sensor_front, sensor_rear, sensor_left, sensor_right]
+        state_size = 5
         action_size = self.action_space.n
-        
-        print(f"Modelo detectado: state_size={state_size}, action_size={action_size}")
-        
-        # Guardar el state_size para usarlo en get_state()
-        self.state_size = state_size
         
         # Crear el agente con las dimensiones correctas
         self.agent = DQNAgent(
             state_size=state_size,
             action_size=action_size,
             hidden_size=64,
-            buffer_size=1000,  # Buffer pequeño para inferencia
+            buffer_size=1000,
             batch_size=32,
             gamma=0.99,
             learning_rate=0.001
         )
         
         # Cargar los pesos del checkpoint
+        checkpoint = torch.load(checkpoint_path, map_location='cpu')
         self.agent.qnetwork_local.load_state_dict(checkpoint['local'])
         self.agent.qnetwork_target.load_state_dict(checkpoint['target'])
         self.agent.qnetwork_local.eval()
         
-        print("Agente cargado correctamente.")
+        print(f"Agente cargado: state_size={state_size}, action_size={action_size}")
     
     def read_sensors(self) -> dict:
-        """Lee las distancias de los sensores (con timeout para evitar bloqueos)."""
+        """
+        Lee las distancias de los sensores en mm (VL53L0X.range devuelve mm).
+        Conviertir automáticamente a cm para que coincida con el simulador.
+        """
         distances = {}
         for name, sensor in self.sensors.items():
             try:
                 # VL53L0X.range devuelve la distancia en mm
-                # Usar un valor por defecto si la lectura es None o excepciona
-                dist = sensor.range
-                distances[name] = dist if dist is not None else 1000
-            except (OSError, RuntimeError):
-                # Timeout o error I2C - usar valor seguro por defecto
-                distances[name] = 1000
+                dist_mm = sensor.range
+                if dist_mm is not None:
+                    # Convertir a cm para coincidir con simulador (cm)
+                    distances[name] = dist_mm / 10.0
+                else:
+                    # Lectura None = fuera de rango = distancia máxima
+                    distances[name] = 2000.0  # 200 cm (rango máximo del VL53L0X)
+            except (OSError, RuntimeError, TimeoutError):
+                # Timeout o error I2C - usar valor seguro por defecto (máxima distancia)
+                distances[name] = 2000.0
         return distances
     
     def get_state(self) -> np.ndarray:
         """
-        Construye el estado actual del robot para el agente (optimizado).
-        Reutiliza distancias de la última lectura para evitar lecturas duplicadas.
-        
-        Returns:
-            Estado normalizado para el agente
+        Construye el estado actual del robot para el agente.
+        Exactamente: [theta, sensor_front, sensor_rear, sensor_left, sensor_right]
+        donde distancias están en cm [0-80] como en el simulador.
         """
-        # Usar cached_distances si existe, sino leer sensores
         if not hasattr(self, 'cached_distances'):
             self.cached_distances = self.read_sensors()
         
         distances = self.cached_distances
         
-        # Normalizar distancias (0 a 2000mm -> 0 a 1)
-        dist_front = distances.get('frontal', 1000) / 2000.0
-        dist_left = distances.get('izquierda', 1000) / 2000.0
-        dist_right = distances.get('derecha', 1000) / 2000.0
+        # Distancias en cm (ya convertidas de mm en read_sensors)
+        dist_front = np.clip(distances.get('frontal', 200.0), 0.0, 80.0)
+        dist_left = np.clip(distances.get('izquierda', 200.0), 0.0, 80.0)
+        dist_right = np.clip(distances.get('derecha', 200.0), 0.0, 80.0)
         
-        # Construir estado base con los sensores
-        state_components = [dist_front, dist_left, dist_right]
-        
-        # Agregar componentes adicionales según el tamaño del estado
-        if self.state_size > 3:
-            # Información adicional (posición, objetivo, velocidad, etc.)
-            # Por ahora usamos valores por defecto
-            additional_components = [
-                0.5,  # pos_x
-                0.5,  # pos_y
-                0.0,  # theta
-                0.8,  # goal_x
-                0.8,  # goal_y
-                0.0,  # velocity
-                0.0,  # extra_1
-                0.0,  # extra_2
-                0.0,  # extra_3
-            ]
-            
-            # Agregar solo los componentes necesarios
-            needed = self.state_size - 3
-            state_components.extend(additional_components[:needed])
-        
-        # Construir el estado como array numpy
-        state = np.array(state_components, dtype=np.float32)
+        # Estado: [theta, sensor_frontal, sensor_trasero, sensor_izq, sensor_der]
+        state = np.array([
+            0.0,          # theta - no disponible en hardware real
+            dist_front,   # sensor frontal
+            dist_right,   # sensor trasero (no disponemos, usar derecho como fallback)
+            dist_left,    # sensor izquierdo
+            dist_right    # sensor derecho
+        ], dtype=np.float32)
         
         return state
     
