@@ -134,24 +134,32 @@ class RobotController:
         print("Agente cargado correctamente.")
     
     def read_sensors(self) -> dict:
-        """Lee las distancias de los sensores."""
+        """Lee las distancias de los sensores (con timeout para evitar bloqueos)."""
         distances = {}
         for name, sensor in self.sensors.items():
             try:
-                distances[name] = sensor.range
-            except Exception:
-                distances[name] = 1000  # Si falla la lectura, asumir distancia segura
+                # VL53L0X.range devuelve la distancia en mm
+                # Usar un valor por defecto si la lectura es None o excepciona
+                dist = sensor.range
+                distances[name] = dist if dist is not None else 1000
+            except (OSError, RuntimeError):
+                # Timeout o error I2C - usar valor seguro por defecto
+                distances[name] = 1000
         return distances
     
     def get_state(self) -> np.ndarray:
         """
-        Construye el estado actual del robot para el agente.
-        Adapta el estado según el tamaño requerido por el modelo.
+        Construye el estado actual del robot para el agente (optimizado).
+        Reutiliza distancias de la última lectura para evitar lecturas duplicadas.
         
         Returns:
             Estado normalizado para el agente
         """
-        distances = self.read_sensors()
+        # Usar cached_distances si existe, sino leer sensores
+        if not hasattr(self, 'cached_distances'):
+            self.cached_distances = self.read_sensors()
+        
+        distances = self.cached_distances
         
         # Normalizar distancias (0 a 2000mm -> 0 a 1)
         dist_front = distances.get('frontal', 1000) / 2000.0
@@ -186,15 +194,14 @@ class RobotController:
         
         return state
     
-    def execute_action(self, action_idx: int):
+    def execute_action(self, action_idx: int | np.intp):
         """
-        Ejecuta una acción en el hardware del robot.
+        Ejecuta una acción en el hardware del robot (sin prints en loop).
         
         Args:
             action_idx: Índice de la acción a ejecutar
         """
-        action = self.action_space.get_action(action_idx)
-        description = self.action_space.describe_action(action)
+        action = self.action_space.get_action(int(action_idx))
         
         # En el modelo de tracción diferencial:
         # speed = velocidad rueda izquierda
@@ -202,9 +209,7 @@ class RobotController:
         left_wheel = action.speed
         right_wheel = action.steering
         
-        print(f"Ejecutando: {description} | Rueda Izq={left_wheel:.2f}, Der={right_wheel:.2f}")
-        
-        # Controlar rueda izquierda
+        # Controlar rueda izquierda (sin print para reducir latencia)
         if left_wheel > 0.1:
             self.motor_left_a.on()
             self.motor_left_b.off()
@@ -244,33 +249,38 @@ class RobotController:
     
     def run(self, duration: float | None = None):
         """
-        Ejecuta el controlador del robot.
+        Ejecuta el controlador del robot (optimizado).
         
         Args:
             duration: Duración en segundos (None para indefinido)
         """
         print("Iniciando controlador del robot...")
         start_time = time.time()
+        step_counter = 0
         
         try:
             while True:
                 # Leer el estado actual
+                self.cached_distances = self.read_sensors()
                 state = self.get_state()
                 
-                # Obtener la acción del agente
-                action_idx = int(self.agent.act(state))
+                # Obtener la acción del agente (sin numpy cast para reducir overhead)
+                with torch.no_grad():
+                    action_idx = self.agent.act(state)
                 
                 # Ejecutar la acción
                 self.execute_action(action_idx)
                 
-                # Mostrar información de sensores
-                distances = self.read_sensors()
-                print(f"Sensores: F={distances.get('frontal', 0):4d}mm | "
-                      f"I={distances.get('izquierda', 0):4d}mm | "
-                      f"D={distances.get('derecha', 0):4d}mm")
+                # Mostrar información cada N pasos (no cada iteración)
+                step_counter += 1
+                if step_counter % 5 == 0:  # Mostrar cada 5 pasos
+                    distances = self.cached_distances
+                    print(f"Step {step_counter}: F={distances.get('frontal', 0):4d}mm | "
+                          f"I={distances.get('izquierda', 0):4d}mm | "
+                          f"D={distances.get('derecha', 0):4d}mm")
                 
-                # Esperar un poco antes de la siguiente acción
-                time.sleep(0.2)
+                # Reducir sleep para mejores tiempos de reacción
+                time.sleep(0.05)  # 50ms = 20 Hz (era 0.2 = 5 Hz)
                 
                 # Verificar duración
                 if duration is not None and (time.time() - start_time) >= duration:
