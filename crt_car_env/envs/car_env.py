@@ -273,33 +273,56 @@ class CRTCarEnv(gym.Env):
         # SISTEMA DE RECOMPENSAS
         # ============================================================
         
-        # 1. RECOMPENSA POR MOVIMIENTO (incentivar avance constante)
+        # 1. RECOMPENSA POR MOVIMIENTO HACIA ADELANTE (muy incentivado)
         distance_traveled = np.linalg.norm(current_pos - self.prev_pos)
-        movement_reward = distance_traveled * 0.5  # Recompensa proporcional a distancia recorrida
-        reward += movement_reward
         
-        # 2. RECOMPENSA POR VELOCIDAD CONSTANTE (evitar detenerse)
-        speed_reward = abs(self.state["speed"]) * 0.1  # Recompensa por mantener velocidad
-        reward += speed_reward
+        # Calcular si el movimiento fue hacia adelante (en dirección de orientación)
+        if distance_traveled > 0.1:  # Solo si hubo movimiento significativo
+            movement_vector = current_pos - self.prev_pos
+            forward_direction = np.array([np.cos(self.state["theta"]), 
+                                         np.sin(self.state["theta"])])
+            
+            # Producto punto para determinar si va hacia adelante
+            forward_component = np.dot(movement_vector, forward_direction)
+            
+            if forward_component > 0:
+                # Movimiento hacia adelante: GRAN recompensa
+                movement_reward = forward_component * 2.0  # Duplicado
+                reward += movement_reward
+            else:
+                # Movimiento hacia atrás: penalización
+                reward -= abs(forward_component) * 0.5
         
-        # 3. PENALIZACIÓN POR ACCIÓN "DETENIDO" (debe seguir moviéndose)
+        # 2. RECOMPENSA POR VELOCIDAD POSITIVA (ir hacia adelante)
+        if self.state["speed"] > 0:
+            # Recompensa proporcional a velocidad hacia adelante
+            speed_reward = self.state["speed"] * 0.3
+            reward += speed_reward
+        else:
+            # Penalización por velocidad negativa o cero
+            reward -= 1.0
+        
+        # 3. RECOMPENSA/PENALIZACIÓN FUERTE POR TIPO DE ACCIÓN
         action_desc = self.discrete_actions.describe_action(discrete_action)
-        if action_desc == "DETENIDO":
-            reward -= 2.0
         
-        # 4. INCENTIVO POR MOVIMIENTO HACIA ADELANTE / PENALIZACIÓN POR REVERSA
         if discrete_action == 0:
-            # ADELANTE puro (ambas ruedas +): bonus extra
-            reward += 1.5
+            # ADELANTE puro (ambas ruedas +): MÁXIMA recompensa
+            reward += 5.0  # Aumentado significativamente
         elif discrete_action in [1, 3]:
-            # Giros suaves con adelante: bonus moderado
-            reward += 0.5
+            # Giros suaves manteniendo adelante: recompensa moderada
+            reward += 1.0
+        elif discrete_action == 2:
+            # Giro cerrado derecha (una rueda reversa): penalización moderada
+            reward -= 2.0
+        elif discrete_action == 4:
+            # DETENIDO: penalización fuerte
+            reward -= 5.0  # Aumentado
         elif discrete_action in [5, 6, 7]:
-            # Acciones con alguna rueda en reversa: penalización
-            reward -= 3.0
+            # Acciones con reversa: penalización muy fuerte
+            reward -= 8.0  # Aumentado
         elif discrete_action == 8:
-            # REVERSA completa (ambas ruedas -): penalización muy fuerte
-            reward -= 5.0
+            # REVERSA completa: penalización extrema
+            reward -= 10.0  # Aumentado
         
         # 5. RECOMPENSA POR MANTENER DISTANCIA SEGURA (evitar obstáculos)
         # Solo usar sensores frontal, izquierdo y derecho (el trasero no es útil)
@@ -342,6 +365,12 @@ class CRTCarEnv(gym.Env):
         
         # Incrementar el contador de pasos
         self.step_count += 1
+        
+        # 9. RECOMPENSA POR SUPERVIVENCIA (cada paso que sobrevive)
+        # Recompensa incremental que aumenta con el tiempo
+        survival_progress = self.step_count / self.max_steps
+        survival_reward = 0.5 + (survival_progress * 2.0)  # De 0.5 a 2.5
+        reward += survival_reward
 
         # Verificar terminación
         terminated = False
@@ -349,43 +378,52 @@ class CRTCarEnv(gym.Env):
 
         # Terminar si hay colisión con pared u obstáculo
         if min_sensor < self.car_width:
-            # Penalización exponencial basada en el tiempo de supervivencia
-            # La penalización es máxima al principio y disminuye exponencialmente
+            # PENALIZACIÓN MUY FUERTE inversamente proporcional al progreso
+            # Cuanto más temprano muere, mayor es la penalización
             progress = self.step_count / self.max_steps
-            base_penalty = 150.0  # Penalización base aumentada
-            early_death_penalty = base_penalty * np.exp(
-                -3 * progress
-            )  # Factor -3 para ajustar la curva
+            
+            # Penalización inversamente proporcional: 1/(progress + 0.01) para evitar división por cero
+            # Escalar para que sea muy fuerte al principio
+            base_penalty = 500.0  # Penalización base muy alta
+            early_death_penalty = base_penalty / (progress + 0.02)  # +0.02 para suavizar un poco
+            
+            # Cap máximo de penalización para evitar valores extremos
+            early_death_penalty = min(early_death_penalty, 2000.0)
 
-            # Penalización extra si la colisión fue frontal
-            if sensor_frontal == min_sensor and action_desc == "ADELANTE":
-                early_death_penalty *= 1.5  # 50% extra por colisión frontal intencional
+            # Penalización extra si la colisión fue frontal con acción adelante
+            if sensor_frontal == min_sensor and discrete_action == 0:
+                early_death_penalty *= 1.5  # 50% extra por colisión frontal con adelante
 
             reward -= early_death_penalty
             if self.render_mode == "human":
-                print(f"\nColisión detectada! Penalización: {early_death_penalty:.2f}")
-                print(f"Tiempo de supervivencia: {self.step_count} pasos")
-                if sensor_frontal == min_sensor and action_desc == "ADELANTE":
-                    print("¡Colisión frontal intencional detectada!")
+                print(f"\n¡COLISIÓN! Penalización: -{early_death_penalty:.2f}")
+                print(f"Sobrevivió {self.step_count} pasos ({progress*100:.1f}% del episodio)")
+                if sensor_frontal == min_sensor and discrete_action == 0:
+                    print("¡Colisión frontal con acción ADELANTE!")
             terminated = True
 
         # Terminar si sale del mapa
         if not (0 <= self.state["x"] <= MAP_WIDTH and 0 <= self.state["y"] <= MAP_HEIGHT):
-            # Penalización similar a la colisión pero ligeramente menor
+            # Penalización inversamente proporcional similar
             progress = self.step_count / self.max_steps
-            base_penalty = 120.0  # Menor que la penalización por colisión
-            early_death_penalty = base_penalty * np.exp(-3 * progress)
+            base_penalty = 400.0  # Ligeramente menor que colisión
+            early_death_penalty = base_penalty / (progress + 0.02)
+            early_death_penalty = min(early_death_penalty, 1500.0)
 
             reward -= early_death_penalty
             if self.render_mode == "human":
-                print(f"\nSalió del mapa! Penalización: {early_death_penalty:.2f}")
-                print(f"Tiempo de supervivencia: {self.step_count} pasos")
+                print(f"\n¡FUERA DEL MAPA! Penalización: -{early_death_penalty:.2f}")
+                print(f"Sobrevivió {self.step_count} pasos ({progress*100:.1f}% del episodio)")
             terminated = True
 
-        # Terminar si se alcanza el máximo de pasos
+        # Terminar si se alcanza el máximo de pasos (ÉXITO COMPLETO)
         if self.step_count >= self.max_steps:
+            # GRAN BONUS por completar el episodio
+            completion_bonus = 100.0
+            reward += completion_bonus
             if self.render_mode == "human":
-                print("\n¡Episodio completado! Supervivencia máxima alcanzada.")
+                print("\n¡EPISODIO COMPLETADO! ¡Supervivencia máxima alcanzada!")
+                print(f"Bonus de completitud: +{completion_bonus:.2f}")
             truncated = True
         info = self._get_info()
 
